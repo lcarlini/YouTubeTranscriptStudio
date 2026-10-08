@@ -2,7 +2,7 @@
   "files": [],
   "references": [
     { "path": "shared" },
-    { "path": "docs" },
+    { "path": "site" },
     { "path": "extension" }
   ]
 }

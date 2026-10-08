@@ -3,11 +3,11 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "workspaces": ["shared", "docs", "extension"],
+  "workspaces": ["shared", "site", "extension"],
   "scripts": {
     "dev": "npm run dev -w @yts/docs",
     "build": "npm run build -w @yts/docs && npm run build -w @yts/extension",
-    "typecheck": "tsc -p shared --noEmit && tsc -p docs --noEmit && tsc -p extension --noEmit",
+    "typecheck": "tsc -p shared --noEmit && tsc -p site --noEmit && tsc -p extension --noEmit",
     "test": "vitest run",
     "lint": "eslint .",
     "check": "npm run typecheck && npm run lint && npm run test && npm run build",

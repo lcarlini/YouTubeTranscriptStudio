@@ -31,6 +31,6 @@ jobs:
       - run: npm run build -w @yts/docs
       - uses: actions/upload-pages-artifact@v3
         with:
-          path: docs/dist
+          path: docs
       - id: deployment
         uses: actions/deploy-pages@v4

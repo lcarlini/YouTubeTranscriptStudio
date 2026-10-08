@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <rect width="1200" height="720" fill="#f3efe7"/>
+  <text x="40" y="40" font-family="Georgia, serif" font-size="18" fill="#9a3412">SCREENSHOT PLACEHOLDER · insights and chat</text>
+  <rect x="40" y="70" width="540" height="600" rx="18" fill="#fffdf9" stroke="#d8d0c3"/>
+  <rect x="620" y="70" width="540" height="600" rx="18" fill="#fffdf9" stroke="#d8d0c3"/>
+  <text x="64" y="120" font-family="Georgia, serif" font-size="28" fill="#1c1915">Insights</text>
+  <text x="64" y="170" font-family="Segoe UI, sans-serif" font-size="16" fill="#4f4a43">TL;DR</text>
+  <text x="64" y="200" font-family="Segoe UI, sans-serif" font-size="18" fill="#1c1915">A short visit, told from in front of the elephants.</text>
+  <text x="64" y="260" font-family="Segoe UI, sans-serif" font-size="16" fill="#4f4a43">Chapters</text>
+  <rect x="64" y="280" width="180" height="36" rx="18" fill="#e4f3ec"/>
+  <text x="80" y="304" font-family="Segoe UI, sans-serif" font-size="16" fill="#0d5c42">0:01 Arrival</text>
+  <text x="644" y="120" font-family="Georgia, serif" font-size="28" fill="#1c1915">Chat</text>
+  <rect x="644" y="150" width="480" height="120" rx="16" fill="#e4f3ec"/>
+  <text x="664" y="190" font-family="Segoe UI, sans-serif" font-size="18" fill="#1c1915">Trunks are the point of the visit.</text>
+  <rect x="664" y="210" width="90" height="32" rx="16" fill="#fff" stroke="#d8d0c3"/>
+  <text x="684" y="232" font-family="ui-monospace, monospace" font-size="14" fill="#1c1915">0:05</text>
+  <rect x="644" y="560" width="360" height="28" rx="14" fill="#f6e2b8"/>
+  <text x="660" y="580" font-family="Segoe UI, sans-serif" font-size="14" fill="#1c1915">Ready · WebGPU</text>
+</svg>

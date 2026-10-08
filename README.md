@@ -8,7 +8,7 @@
 [![GitHub Pages](https://img.shields.io/badge/GitHub_Pages-docs%2Findex.html-1c1915)](https://lcarlini.github.io/YouTubeTranscriptStudio/)
 [![Local AI](https://img.shields.io/badge/AI-in--browser_Qwen2.5_0.5B-9a3412)](https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct)
 
-**Live site:** [https://lcarlini.github.io/YouTubeTranscriptStudio/](https://lcarlini.github.io/YouTubeTranscriptStudio/) · source entry [`docs/index.html`](docs/index.html)
+**Live site:** [https://lcarlini.github.io/YouTubeTranscriptStudio/](https://lcarlini.github.io/YouTubeTranscriptStudio/) · source entry [`site/index.html`](site/index.html)
 
 YouTube Transcript Studio is a static website and a Chrome extension for people who want the words from a video without sending those words to a hosted chatbot. Captions stay in the tab. Summaries, flashcards, quizzes, and chat run in a Web Worker through [Transformers.js](https://huggingface.co/docs/transformers.js).
 
@@ -18,7 +18,7 @@ Paste a YouTube URL and choose **Process video**. The studio loads the caption t
 
 | Surface | What it is |
 | --- | --- |
-| [`/docs`](docs/index.html) | GitHub Pages site. Vite builds this entry into static files. |
+| [`/site`](site/index.html) | Website source. The production build is committed in [`/docs`](docs/index.html) for GitHub Pages. |
 | [`/extension`](extension/manifest.json) | Manifest V3 side panel for `youtube.com/watch` pages. |
 | [`/shared`](shared/src/index.ts) | Transcript parsing, exports, prompts, IndexedDB, and the model client. |
 
@@ -40,11 +40,11 @@ These are labeled interface mockups. Replace them with captures from your own br
 
 | Studio overview | Transcript search |
 | --- | --- |
-| ![Studio overview mockup](docs/assets/screenshots/studio-overview.svg) | ![Transcript search mockup](docs/assets/screenshots/transcript-search.svg) |
+| ![Studio overview mockup](site/screenshots/studio-overview.png) | ![Transcript search mockup](site/screenshots/transcript-search.png) |
 
 | Insights and chat | Extension side panel |
 | --- | --- |
-| ![Insights and chat mockup](docs/assets/screenshots/insights-chat.svg) | ![Extension side panel mockup](docs/assets/screenshots/extension-sidepanel.svg) |
+| ![Insights and chat mockup](site/screenshots/insights-chat.png) | ![Extension side panel mockup](site/screenshots/extension-sidepanel.png) |
 
 ## Architecture
 
@@ -120,7 +120,7 @@ npm run build -w @yts/docs
 npm run preview
 ```
 
-The preview serves `docs/dist` as a static site. There is no backend.
+The preview serves the built site in `docs/` as a static site. There is no backend.
 
 ## Install the Chrome extension
 
@@ -174,7 +174,7 @@ Caption fetching is separate from inference:
 
 ## Enable GitHub Pages
 
-The site source is [`docs/index.html`](docs/index.html). [`.github/workflows/pages.yml`](.github/workflows/pages.yml) builds that Vite app and deploys `docs/dist`.
+The site source is [`site/index.html`](site/index.html). `npm run build -w @yts/docs` writes the static site into [`/docs`](docs/index.html), which is the folder GitHub Pages already publishes from `main`. [`.github/workflows/pages.yml`](.github/workflows/pages.yml) builds that same folder and can deploy it when Pages is set to GitHub Actions.
 
 1. Push to `main`.
 2. In the repository, open **Settings → Pages**.
@@ -188,7 +188,7 @@ Asset URLs are relative (`base: "./"`), so the built site works on the project P
 ```bash
 npm install
 npm run dev          # website
-npm run build        # docs/dist and extension/dist
+npm run build        # docs/ and extension/dist
 npm run typecheck
 npm run lint
 npm test
@@ -203,7 +203,8 @@ npm run check        # typecheck, lint, test, and build
 | `shared/src/ai` | Chunking, prompts, output parsers, model worker |
 | `shared/src/ui` | Studio interface mounted by the site and the side panel |
 | `shared/src/i18n` | UI catalogs |
-| `docs` | Website |
+| `site` | Website source |
+| `docs` | Built website published by GitHub Pages |
 | `extension` | Manifest, side panel, content script, service worker |
 
 Regenerate the extension icons with `node scripts/generate-icons.mjs`.

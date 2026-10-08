@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+  <rect width="1200" height="720" fill="#111"/>
+  <rect x="80" y="40" width="1040" height="640" rx="12" fill="#0f0f0f"/>
+  <rect x="80" y="40" width="1040" height="56" fill="#212121"/>
+  <text x="100" y="74" font-family="Segoe UI, sans-serif" font-size="18" fill="#fff">YouTube watch page</text>
+  <rect x="760" y="110" width="340" height="550" rx="16" fill="#f3efe7"/>
+  <text x="780" y="150" font-family="Georgia, serif" font-size="16" fill="#9a3412">SCREENSHOT PLACEHOLDER · extension side panel</text>
+  <text x="780" y="200" font-family="Georgia, serif" font-size="28" fill="#1c1915">Transcript Studio</text>
+  <rect x="780" y="230" width="220" height="40" rx="20" fill="#0d5c42"/>
+  <text x="796" y="256" font-family="Segoe UI, sans-serif" font-size="14" fill="#fff">Use the video on this tab</text>
+  <text x="780" y="310" font-family="Segoe UI, sans-serif" font-size="14" fill="#4f4a43">Transcript · Insights · Chat · Study · Export</text>
+  <rect x="900" y="620" width="220" height="44" rx="22" fill="#0d5c42"/>
+  <text x="930" y="648" font-family="Segoe UI, sans-serif" font-size="15" fill="#fff">Open Transcript Studio</text>
+</svg>
