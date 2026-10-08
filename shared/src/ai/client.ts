@@ -1,3 +1,4 @@
+import { probeGpu, readGraphicsRenderer, readNavigatorGpu } from "./gpu";
 import { StudioError } from "../errors";
 import type { CacheUsage, InferenceDevice, ModelPhase } from "../types";
 
@@ -7,6 +8,8 @@ interface ProgressEvent {
   phase: ModelPhase;
   progress: number | null;
   device: InferenceDevice | null;
+  gpuLabel?: string;
+  fellBackFromGpu?: boolean;
 }
 
 interface ResultEvent {
@@ -32,6 +35,8 @@ interface PendingCall {
 export class LocalModelClient {
   phase: ModelPhase = "idle";
   device: InferenceDevice | null = null;
+  gpuLabel = "";
+  fellBackFromGpu = false;
   progress: number | null = null;
   private readonly worker: Worker;
   private seq = 0;
@@ -50,6 +55,8 @@ export class LocalModelClient {
         this.phase = data.phase;
         this.progress = data.progress;
         this.device = data.device ?? this.device;
+        if (data.gpuLabel) this.gpuLabel = data.gpuLabel;
+        this.fellBackFromGpu = Boolean(data.fellBackFromGpu);
         this.onChange();
         return;
       }
@@ -74,6 +81,18 @@ export class LocalModelClient {
     if (wasmPaths) {
       this.configured = this.send("configure", { wasmPaths }).then(() => undefined);
     }
+    void this.detectGpu();
+  }
+
+  private async detectGpu(): Promise<void> {
+    const profile = await probeGpu(
+      readNavigatorGpu(globalThis.navigator),
+      "high-performance GPU",
+      readGraphicsRenderer(globalThis),
+    );
+    if (!profile.label) return;
+    this.gpuLabel = profile.label;
+    this.onChange();
   }
 
   ensureLoaded(): Promise<void> {
@@ -106,6 +125,7 @@ export class LocalModelClient {
     await this.send("clear-cache", {});
     this.phase = "idle";
     this.device = null;
+    this.fellBackFromGpu = false;
     this.progress = null;
     this.onChange();
   }

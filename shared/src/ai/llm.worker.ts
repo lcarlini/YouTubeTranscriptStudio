@@ -1,3 +1,4 @@
+import { probeGpu, preferWebGpu, readGraphicsRenderer, readNavigatorGpu } from "./gpu";
 import { extractGeneratedText } from "./parse-model";
 import { LOCAL_MODEL_DTYPE, LOCAL_MODEL_ID } from "../identity";
 import type { CacheUsage, InferenceDevice, ModelPhase } from "../types";
@@ -44,6 +45,8 @@ interface TextGenerator {
 let wasmPaths = "";
 let generator: TextGenerator | null = null;
 let device: InferenceDevice | null = null;
+let gpuLabel = "";
+let fellBackFromGpu = false;
 let ready = false;
 let queue: Promise<void> = Promise.resolve();
 
@@ -101,18 +104,9 @@ function postProgress(phase: ModelPhase, progress: number | null): void {
     phase,
     progress,
     device,
+    gpuLabel,
+    fellBackFromGpu,
   });
-}
-
-async function hasWebGpu(): Promise<boolean> {
-  const gpu = (scope.navigator as Navigator & { gpu?: { requestAdapter: () => Promise<unknown> } }).gpu;
-  if (!gpu) return false;
-  try {
-    const adapter = await gpu.requestAdapter();
-    return Boolean(adapter);
-  } catch {
-    return false;
-  }
 }
 
 async function loadModel(): Promise<void> {
@@ -122,17 +116,34 @@ async function loadModel(): Promise<void> {
   }
 
   postProgress("checking", null);
-  const attempts: Array<{ device: InferenceDevice; dtype: "q4" | "uint8" }> = [];
-  if (await hasWebGpu()) attempts.push({ device: "webgpu", dtype: LOCAL_MODEL_DTYPE });
-  attempts.push({ device: "wasm", dtype: LOCAL_MODEL_DTYPE }, { device: "wasm", dtype: "uint8" });
+  const profile = await probeGpu(
+    readNavigatorGpu(scope.navigator),
+    "high-performance GPU",
+    readGraphicsRenderer(scope),
+  );
+  gpuLabel = profile.label;
+  const useGpu = preferWebGpu(profile);
+  fellBackFromGpu = false;
+  postProgress("checking", null);
+  const attempts: Array<{ device: InferenceDevice; dtype: "q4" | "q4f16" | "uint8" }> = [];
+  if (useGpu) {
+    attempts.push({ device: "webgpu", dtype: LOCAL_MODEL_DTYPE }, { device: "webgpu", dtype: "q4f16" });
+  }
+  attempts.push({ device: "wasm", dtype: "uint8" });
 
   const transformers = await import("@huggingface/transformers");
   transformers.env.allowLocalModels = false;
   transformers.env.useBrowserCache = true;
-  const wasm = transformers.env.backends.onnx.wasm;
+  const onnx = transformers.env.backends.onnx;
+  const wasm = onnx.wasm;
   if (!wasm) throw new Error("The WASM runtime is unavailable.");
   wasm.numThreads = 1;
   if (wasmPaths) wasm.wasmPaths = wasmPaths;
+  const webgpu = onnx.webgpu as { powerPreference?: string; forceFallbackAdapter?: boolean } | undefined;
+  if (webgpu) {
+    webgpu.powerPreference = "high-performance";
+    webgpu.forceFallbackAdapter = false;
+  }
 
   let lastError: unknown;
   for (const attempt of attempts) {
@@ -158,12 +169,14 @@ async function loadModel(): Promise<void> {
       });
       generator = created as unknown as TextGenerator;
       ready = true;
+      fellBackFromGpu = useGpu && attempt.device !== "webgpu";
       postProgress("ready", null);
       return;
     } catch (error) {
       lastError = error;
       generator = null;
       ready = false;
+      device = null;
     }
   }
 

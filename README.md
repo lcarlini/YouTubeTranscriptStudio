@@ -85,7 +85,7 @@ flowchart LR
 3. `npm run dev` proxies that request through Vite, because a page on another origin cannot read `youtube.com` directly.
 4. The extension has host permission for YouTube, so the side panel and service worker can read the same endpoint without a proxy. A button on the watch page opens the side panel.
 5. The first time you generate insights, chat, or a study set, a worker downloads `onnx-community/Qwen2.5-0.5B-Instruct`. Later visits use the Transformers.js browser cache.
-6. WebGPU with `dtype: "q4"` is used when the browser can create a GPU adapter. Otherwise the worker loads the WASM build. `q4` is tried first there too, then `uint8` if that runtime rejects 4-bit weights.
+6. The worker asks for the high-performance WebGPU adapter (a discrete card such as an RTX 5070) and loads `dtype: "q4"` on it. If that 4-bit build cannot start, it tries `q4f16` on the same GPU. WASM `uint8` is used only when no real GPU adapter is available, or when both GPU builds fail to start.
 7. Chat retrieval picks transcript lines by word overlap, sends those excerpts to the model, and keeps the answer only when it cites a timestamp from the text.
 
 ## Local model
@@ -94,7 +94,7 @@ flowchart LR
 | --- | --- |
 | Model | [`onnx-community/Qwen2.5-0.5B-Instruct`](https://huggingface.co/onnx-community/Qwen2.5-0.5B-Instruct) |
 | Task | `text-generation` |
-| Quantization | `q4` on WebGPU; WASM falls back to `uint8` if `q4` cannot load |
+| Quantization | `q4` on the high-performance GPU, then `q4f16` on that GPU; WASM `uint8` only if the GPU cannot start the model |
 | Runtime | Transformers.js inside a dedicated Web Worker |
 | Threads | One WASM thread, so GitHub Pages does not need cross-origin isolation |
 | Cache | Browser Cache API (`transformers-cache`) plus `navigator.storage` |

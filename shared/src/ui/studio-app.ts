@@ -1203,22 +1203,40 @@ class StudioApp {
 
   private paintModel(): void {
     const phase = this.model.phase;
+    const place = this.model.device === "webgpu"
+      ? (this.model.gpuLabel || this.t("deviceWebgpu"))
+      : this.model.device === "wasm"
+        ? this.t("deviceWasm")
+        : this.model.gpuLabel;
     this.nodes.modelPill.dataset.phase = phase;
     let label = this.t("modelIdle");
-    if (phase === "checking") label = this.t("modelChecking");
+    if (phase === "idle" && place) label = `${this.t("modelIdle")} · ${place}`;
+    if (phase === "checking") label = place ? `${this.t("modelChecking")} · ${place}` : this.t("modelChecking");
     if (phase === "downloading") {
       label = this.model.progress === null ? this.t("modelDownloading") : `${this.t("modelDownloading")} ${Math.round(this.model.progress)}%`;
     }
-    if (phase === "loading") label = this.t("modelLoading");
-    if (phase === "ready") label = this.model.device ? `${this.t("modelReady")} · ${this.model.device === "webgpu" ? this.t("deviceWebgpu") : this.t("deviceWasm")}` : this.t("modelReady");
+    if (phase === "loading") label = place ? `${this.t("modelLoading")} · ${place}` : this.t("modelLoading");
+    if (phase === "ready") label = place ? `${this.t("modelReady")} · ${place}` : this.t("modelReady");
     if (phase === "generating") label = this.t("modelGenerating");
     if (phase === "error") label = this.t("modelError");
     this.nodes.modelPill.textContent = label;
     this.nodes.settingsStatus.textContent = label;
-    this.nodes.deviceValue.textContent = this.model.device === "webgpu" ? this.t("deviceWebgpu") : this.model.device === "wasm" ? this.t("deviceWasm") : "—";
+    if (this.model.device === "webgpu") {
+      this.nodes.deviceValue.textContent = this.model.gpuLabel
+        ? `${this.t("deviceWebgpu")} · ${this.model.gpuLabel}`
+        : this.t("deviceWebgpu");
+    } else if (this.model.device === "wasm") {
+      this.nodes.deviceValue.textContent = this.t("deviceWasm");
+    } else {
+      this.nodes.deviceValue.textContent = this.model.gpuLabel || "—";
+    }
     const gpuMissing = typeof navigator === "undefined" || !("gpu" in navigator);
     this.nodes.fallback.hidden = this.model.device !== "wasm";
-    this.nodes.fallback.textContent = gpuMissing ? this.t("webgpuFallback") : this.t("wasmFallback");
+    if (this.model.fellBackFromGpu && this.model.gpuLabel) {
+      this.nodes.fallback.textContent = this.t("gpuStartFailed", { name: this.model.gpuLabel });
+    } else {
+      this.nodes.fallback.textContent = gpuMissing ? this.t("webgpuFallback") : this.t("wasmFallback");
+    }
   }
 
   private async refreshCacheLabel(): Promise<void> {
