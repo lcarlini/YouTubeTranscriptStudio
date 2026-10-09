@@ -1,6 +1,6 @@
 "use strict";
 (() => {
-  // ../shared/src/i18n/es.ts
+  // shared/src/i18n/es.ts
   var es = {
     skip: "Saltar al contenido",
     brand: "YouTube Transcript Studio",
@@ -166,7 +166,7 @@
     statusLabel: "Estado del modelo"
   };
 
-  // ../shared/src/i18n/en.ts
+  // shared/src/i18n/en.ts
   var en = {
     skip: "Skip to content",
     brand: "YouTube Transcript Studio",
@@ -332,7 +332,7 @@
     statusLabel: "Model status"
   };
 
-  // ../shared/src/i18n/pt-BR.ts
+  // shared/src/i18n/pt-BR.ts
   var ptBR = {
     skip: "Ir para o conte\xFAdo",
     brand: "YouTube Transcript Studio",
@@ -498,7 +498,7 @@
     statusLabel: "Estado do modelo"
   };
 
-  // ../shared/src/i18n/index.ts
+  // shared/src/i18n/index.ts
   var catalogs = {
     en,
     "pt-BR": ptBR,
@@ -510,7 +510,7 @@
     return template.replace(/\{(\w+)\}/g, (_, name) => String(vars[name] ?? ""));
   }
 
-  // ../shared/src/storage/preferences.ts
+  // shared/src/storage/preferences.ts
   function detectLocale(language) {
     const value = (language ?? "").toLowerCase();
     if (value.startsWith("pt")) return "pt-BR";
@@ -522,7 +522,7 @@
     return null;
   }
 
-  // src/content.ts
+  // extension/src/content.ts
   var BUTTON_ID = "yts-open-studio";
   function localeFrom(value) {
     return readStoredLocale(typeof value === "string" ? value : null) ?? detectLocale(navigator.language);

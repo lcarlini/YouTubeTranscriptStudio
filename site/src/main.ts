@@ -1,7 +1,7 @@
 import { mountStudio } from "../../shared/src/ui/studio-app";
 import "../../shared/src/ui/app.css";
 import { canonicalWatchUrl } from "../../shared/src/youtube/url";
-import { tryExtensionFetch } from "./extension-bridge";
+import { tryCaptionFrame, tryExtensionFetch } from "./extension-bridge";
 
 const root = document.querySelector("#app");
 if (root instanceof HTMLElement) {
@@ -12,6 +12,7 @@ if (root instanceof HTMLElement) {
     openAtTimestamp: (videoId, seconds) => {
       window.open(canonicalWatchUrl(videoId, seconds), "_blank", "noopener");
     },
+    tryCaptionFrame,
     tryExtensionFetch,
   });
 }

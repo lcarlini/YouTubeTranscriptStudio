@@ -12,7 +12,36 @@
     <link rel="icon" href="./favicon.svg" type="image/svg+xml" />
   </head>
   <body>
+    <div class="extension-install">
+      <a href="./install-extension.bat" download="Install-YouTube-Transcript-Studio.bat">Download the Chrome extension</a>
+      <p>Run the downloaded file. It saves the extension and opens Chrome. Turn on Developer mode, click Load unpacked, and paste the folder path.</p>
+    </div>
     <div id="app"></div>
     <script type="module" src="./src/main.ts"></script>
+    <style>
+      .extension-install {
+        position: sticky;
+        top: 0;
+        z-index: 40;
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: center;
+        gap: 10px 18px;
+        padding: 12px 20px;
+        background: #0d5c42;
+        color: #f7f4ee;
+        font: 600 15px/1.4 "Segoe UI", sans-serif;
+        text-align: center;
+      }
+      .extension-install a {
+        color: #1c1915;
+        background: #f6e2b8;
+        text-decoration: none;
+        border-radius: 999px;
+        padding: 8px 14px;
+      }
+      .extension-install p { margin: 0; font-weight: 500; max-width: 46rem; }
+    </style>
   </body>
 </html>

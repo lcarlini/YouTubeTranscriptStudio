@@ -55,6 +55,7 @@ export interface StudioHost {
   wasmPaths?: string;
   getContextVideo: () => Promise<string | null>;
   openAtTimestamp: (videoId: string, seconds: number) => void;
+  tryCaptionFrame?: (videoId: string, languages: string[]) => Promise<FetchedTranscript | null>;
   tryExtensionFetch?: (videoId: string, languages: string[]) => Promise<FetchedTranscript | null>;
   onLocaleChange?: (locale: "en" | "pt-BR" | "es") => void;
 }
@@ -622,7 +623,8 @@ class StudioApp {
     }
     try {
       const languages = preferredCaptionLanguages(this.locale);
-      let fetched = this.host.tryExtensionFetch ? await this.host.tryExtensionFetch(videoId, languages) : null;
+      let fetched = this.host.tryCaptionFrame ? await this.host.tryCaptionFrame(videoId, languages) : null;
+      fetched ??= this.host.tryExtensionFetch ? await this.host.tryExtensionFetch(videoId, languages) : null;
       fetched ??= await fetchYouTubeTranscript(videoId, {
         preferredLanguages: languages,
         youtubeProxyPrefix: this.host.devProxy ? "/yt-proxy" : null,

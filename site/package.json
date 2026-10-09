@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "node ./scripts/pack-extension.mjs && vite build",
     "preview": "vite preview --host 127.0.0.1 --port 4173"
   }
 }

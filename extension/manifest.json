@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "YouTube Transcript Studio",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Extract the current YouTube transcript, export it, and chat with a local in-browser AI.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAl5f8AjI7/4vGRYqDcQMuifGxeQFBjWjxCN8/6GiY4mGVkRoc41FaFZbpqLhgNNrCB82o6Bp6PA1PjSFaw++syZZUSbWWr0YmmFObD5LT7g3g7WFyw0rsm+5dNAAoLWiOI9TFIM2US5oF3e/6+OWMotbv8Zqjk4n1PGWsqx2EoPWRRpFEtmFRnDuWaCIp4Gigx5mxiNJdvQwYzVLydGKua/9I5H/sCyEAVmK7FVSYc5PzDKE7dnpPuDnfrChh1Mt7N4Hv2RovzlQ/hbv+7SYBk5rVC+DLbkSsyXWFN+3hrXnTMlS9UMWzgbw8PUxjpUy/hNndOxXY7ncWqCgHQFJABwIDAQAB",
   "permissions": ["sidePanel", "storage", "tabs", "scripting"],
@@ -35,6 +35,12 @@
       "matches": ["https://www.youtube.com/watch*"],
       "js": ["dist/content.js"],
       "run_at": "document_idle"
+    },
+    {
+      "matches": ["https://www.youtube.com/embed/*"],
+      "js": ["dist/caption-bridge.js"],
+      "run_at": "document_start",
+      "all_frames": true
     }
   ],
   "icons": {

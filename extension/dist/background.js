@@ -1,4 +1,4 @@
-// ../shared/src/errors.ts
+// shared/src/errors.ts
 var StudioError = class extends Error {
   code;
   constructor(code, message) {
@@ -8,7 +8,7 @@ var StudioError = class extends Error {
   }
 };
 
-// ../shared/src/transcript/parse.ts
+// shared/src/transcript/parse.ts
 function decodeCaptionText(value) {
   return value.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&#(\d+);/g, (_, digits) => String.fromCodePoint(Number(digits))).replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16))).replace(/\s+/g, " ").trim();
 }
@@ -137,7 +137,7 @@ function parseTranscriptPayload(payload) {
   return parsePlainTranscript(payload).segments;
 }
 
-// ../shared/src/youtube/url.ts
+// shared/src/youtube/url.ts
 function canonicalWatchUrl(videoId, seconds) {
   const url = new URL("https://www.youtube.com/watch");
   url.searchParams.set("v", videoId);
@@ -150,167 +150,106 @@ function thumbnailUrl(videoId) {
   return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 }
 
-// ../shared/src/youtube/fetch-transcript.ts
-var INVIDIOUS_INSTANCES = ["https://inv.nadeko.net"];
-function pickCaptionTrack(tracks, preferred) {
-  const usable = tracks.filter((track) => track.baseUrl && /^[a-z]{2,3}(?:-[a-z0-9]+)?$/i.test(track.languageCode));
-  if (usable.length === 0) return null;
-  for (const language of preferred) {
-    const manual = usable.find((track) => track.languageCode.toLowerCase() === language && track.kind !== "asr");
-    if (manual) return manual;
+// shared/src/youtube/caption-frame.ts
+function transcriptFromCaptionResult(videoId, result) {
+  if (!result.ok) {
+    throw new StudioError(
+      result.code,
+      result.code === "no-captions" ? "This video does not expose captions." : "The transcript request failed."
+    );
   }
-  for (const language of preferred) {
-    const any = usable.find((track) => track.languageCode.toLowerCase().startsWith(language));
-    if (any) return any;
-  }
-  return usable[0] ?? null;
-}
-async function fetchYouTubeTranscript(videoId, options = {}) {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const preferred = options.preferredLanguages ?? ["en"];
-  const meta = await fetchMetadata(videoId, fetchImpl, options.signal);
-  try {
-    const direct = await fetchDirect(videoId, preferred, options);
-    return {
-      videoId,
-      url: canonicalWatchUrl(videoId),
-      ...meta,
-      ...direct,
-      timestampsEstimated: false
-    };
-  } catch (error) {
-    const fallback = await fetchInvidious(videoId, preferred, fetchImpl, options.signal);
-    if (fallback) {
-      return { videoId, url: canonicalWatchUrl(videoId), ...meta, ...fallback, timestampsEstimated: false };
-    }
-    if (error instanceof StudioError) throw error;
-    if (options.browserPage && isFetchFailure(error)) {
-      throw new StudioError("cors-blocked", "The browser blocked a direct request to YouTube.");
-    }
-    if (isFetchFailure(error)) {
-      throw new StudioError("network", "The transcript request failed.");
-    }
-    throw error instanceof Error ? error : new StudioError("network", "The transcript request failed.");
-  }
-}
-async function fetchDirect(videoId, preferred, options) {
-  const fetchImpl = options.fetchImpl ?? fetch;
-  const playerUrl = rewriteYouTubeUrl(
-    "https://www.youtube.com/youtubei/v1/player?prettyPrint=false",
-    options.youtubeProxyPrefix
-  );
-  let response;
-  try {
-    response = await fetchImpl(playerUrl, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify({
-        context: { client: { clientName: "ANDROID", clientVersion: "20.10.38", hl: "en" } },
-        videoId
-      }),
-      signal: options.signal
-    });
-  } catch (error) {
-    if (options.browserPage) {
-      throw new StudioError("cors-blocked", "The browser blocked a direct request to YouTube.");
-    }
-    throw new StudioError("network", error instanceof Error ? error.message : "Network error");
-  }
-  if (!response.ok) {
-    throw new StudioError("network", `YouTube returned ${response.status} while loading captions.`);
-  }
-  const player = await response.json();
-  const tracks = (player.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? []).filter((track) => track.baseUrl && track.languageCode).map((track) => ({
-    baseUrl: track.baseUrl,
-    languageCode: track.languageCode,
-    kind: track.kind
-  }));
-  if (tracks.length === 0) {
-    throw new StudioError("no-captions", "This video does not expose captions.");
-  }
-  const selected = pickCaptionTrack(tracks, preferred);
-  if (!selected) {
-    throw new StudioError("unsupported-language", "No usable caption language was found.");
-  }
-  const captionUrl = rewriteYouTubeUrl(selected.baseUrl, options.youtubeProxyPrefix);
-  let captionResponse;
-  try {
-    captionResponse = await fetchImpl(captionUrl, { signal: options.signal });
-  } catch (error) {
-    if (options.browserPage) {
-      throw new StudioError("cors-blocked", "The browser blocked a direct request to YouTube.");
-    }
-    throw new StudioError("network", error instanceof Error ? error.message : "Network error");
-  }
-  if (!captionResponse.ok) {
-    throw new StudioError("network", "The caption track could not be downloaded.");
-  }
-  const body = await captionResponse.text();
-  const segments = parseTranscriptPayload(body);
+  const segments = parseTranscriptPayload(result.xml);
   if (segments.length === 0) {
     throw new StudioError("no-captions", "The caption track was empty.");
   }
-  return { segments, captionLanguage: selected.languageCode };
-}
-async function fetchInvidious(videoId, preferred, fetchImpl, signal) {
-  for (const base of INVIDIOUS_INSTANCES) {
-    try {
-      const listResponse = await fetchImpl(`${base}/api/v1/captions/${videoId}`, { signal });
-      if (!listResponse.ok) continue;
-      const payload = await listResponse.json();
-      const tracks = (payload.captions ?? []).filter((track) => track.url && track.languageCode).map((track) => ({
-        baseUrl: track.url,
-        languageCode: track.languageCode
-      }));
-      const selected = pickCaptionTrack(tracks, preferred) ?? tracks[0];
-      if (!selected) continue;
-      const url = selected.baseUrl.startsWith("http") ? selected.baseUrl : `${base}${selected.baseUrl}`;
-      const bodyResponse = await fetchImpl(url, { signal });
-      if (!bodyResponse.ok) continue;
-      const text = await bodyResponse.text();
-      const segments = parseTranscriptPayload(text);
-      if (segments.length === 0) continue;
-      return { segments, captionLanguage: selected.languageCode };
-    } catch {
-      continue;
-    }
-  }
-  return null;
-}
-async function fetchMetadata(videoId, fetchImpl, signal) {
-  const fallback = {
-    title: "YouTube video",
-    author: "",
-    thumbnailUrl: thumbnailUrl(videoId)
+  return {
+    videoId,
+    url: canonicalWatchUrl(videoId),
+    title: result.title || "YouTube video",
+    author: result.author,
+    thumbnailUrl: thumbnailUrl(videoId),
+    captionLanguage: result.languageCode,
+    segments,
+    timestampsEstimated: false
   };
-  try {
-    const watch = canonicalWatchUrl(videoId);
-    const response = await fetchImpl(
-      `https://www.youtube.com/oembed?url=${encodeURIComponent(watch)}&format=json`,
-      { signal }
-    );
-    if (!response.ok) return fallback;
-    const data = await response.json();
-    return {
-      title: data.title?.trim() || fallback.title,
-      author: data.author_name?.trim() || "",
-      thumbnailUrl: data.thumbnail_url || fallback.thumbnailUrl
-    };
-  } catch {
-    return fallback;
-  }
-}
-function rewriteYouTubeUrl(url, proxyPrefix) {
-  if (!proxyPrefix) return url;
-  const parsed = new URL(url, "https://www.youtube.com");
-  const prefix = proxyPrefix.replace(/\/$/, "");
-  return `${prefix}${parsed.pathname}${parsed.search}`;
-}
-function isFetchFailure(error) {
-  return error instanceof TypeError || error instanceof StudioError && error.code === "cors-blocked";
 }
 
-// src/background.ts
+// shared/src/youtube/read-caption-xml.ts
+async function readCaptionXml(videoId, languages) {
+  try {
+    const rootLookup = () => typeof document === "undefined" ? null : document.getElementById("movie_player");
+    let player = null;
+    let discovery = "fetch";
+    if (typeof document !== "undefined") {
+      const deadline = Date.now() + 5e3;
+      while (Date.now() < deadline) {
+        const playerNode = rootLookup();
+        if (playerNode?.getPlayerResponse) {
+          try {
+            const candidate = playerNode.getPlayerResponse();
+            const ready = candidate?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+            if (ready.some((track) => track.baseUrl && track.languageCode)) {
+              player = candidate ?? null;
+              discovery = "player";
+              break;
+            }
+            discovery = "player-empty";
+          } catch (error) {
+            discovery = error instanceof Error ? `player ${error.message}` : "player-throw";
+          }
+        } else {
+          discovery = `dom:${Boolean(playerNode)}`;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+    if (!player) {
+      const response = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          context: { client: { clientName: "ANDROID", clientVersion: "20.10.38", hl: "en" } },
+          videoId
+        })
+      });
+      if (!response.ok) return { ok: false, code: "network", detail: `${discovery} http ${response.status}` };
+      player = await response.json();
+      discovery = `${discovery}+fetch`;
+    }
+    const tracks = (player?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? []).filter(
+      (track) => Boolean(track.baseUrl && track.languageCode)
+    );
+    const preferred = (Array.isArray(languages) ? languages : ["en"]).map((language) => language.toLowerCase());
+    let selected;
+    for (const language of preferred) {
+      selected = tracks.find((track) => track.languageCode?.toLowerCase() === language && track.kind !== "asr");
+      if (selected) break;
+    }
+    if (!selected) {
+      for (const language of preferred) {
+        selected = tracks.find((track) => (track.languageCode ?? "").toLowerCase().startsWith(language));
+        if (selected) break;
+      }
+    }
+    selected ??= tracks[0];
+    if (!selected?.baseUrl || !selected.languageCode) return { ok: false, code: "no-captions", detail: discovery };
+    const caption = await fetch(selected.baseUrl);
+    if (!caption.ok) return { ok: false, code: "network", detail: `${discovery} caption ${caption.status}` };
+    const xml = await caption.text();
+    if (!xml.trim()) return { ok: false, code: "no-captions", detail: `${discovery} empty` };
+    return {
+      ok: true,
+      xml,
+      languageCode: selected.languageCode,
+      title: player?.videoDetails?.title?.trim() || "YouTube video",
+      author: player?.videoDetails?.author?.trim() || ""
+    };
+  } catch (error) {
+    return { ok: false, code: "network", detail: error instanceof Error ? error.message : "throw" };
+  }
+}
+
+// extension/src/background.ts
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => void 0);
 });
@@ -322,11 +261,92 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     void chrome.sidePanel.open({ tabId: sender.tab.id }).then(() => sendResponse({ ok: true })).catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "permission" }));
     return true;
   }
+  if (message?.type === "caption-in-frame" && sender.tab?.id !== void 0 && typeof message.videoId === "string") {
+    const languages = Array.isArray(message.languages) ? message.languages.filter((item) => typeof item === "string") : ["en"];
+    void readCaptionsInFrame(sender.tab.id, sender.frameId, message.videoId, languages).then((result) => sendResponse(result)).catch((error) => sendResponse({ ok: false, code: "network", detail: error instanceof Error ? error.message : String(error) }));
+    return true;
+  }
+  if (message?.type === "fetch-transcript" && typeof message.videoId === "string") {
+    respondWithTranscript(message, sendResponse);
+    return true;
+  }
   return void 0;
 });
 chrome.runtime.onMessageExternal.addListener((message, _sender, sendResponse) => {
+  if (message?.type === "ping") {
+    sendResponse({ ok: true });
+    return void 0;
+  }
   if (message?.type !== "fetch-transcript" || typeof message.videoId !== "string") return void 0;
-  const languages = Array.isArray(message.languages) ? message.languages.filter((item) => typeof item === "string") : ["en"];
-  void fetchYouTubeTranscript(message.videoId, { preferredLanguages: languages, browserPage: false }).then((data) => sendResponse({ ok: true, data })).catch((error) => sendResponse({ ok: false, error: error instanceof Error ? error.message : "failed" }));
+  respondWithTranscript(message, sendResponse);
   return true;
 });
+function respondWithTranscript(message, sendResponse) {
+  const languages = Array.isArray(message.languages) ? message.languages.filter((item) => typeof item === "string") : ["en"];
+  void fetchTranscriptFromYouTubeFrame(message.videoId, languages).then((data) => sendResponse({ ok: true, data })).catch((error) => {
+    const code = error instanceof StudioError ? error.code : "network";
+    sendResponse({ ok: false, code, error: error instanceof Error ? error.message : "failed" });
+  });
+}
+async function readCaptionsInFrame(tabId, frameId, videoId, languages) {
+  const injected = await chrome.scripting.executeScript({
+    target: frameId === void 0 ? { tabId } : { tabId, frameIds: [frameId] },
+    world: "MAIN",
+    func: readCaptionXml,
+    args: [videoId, languages]
+  });
+  return injected[0]?.result ?? { ok: false, code: "network" };
+}
+async function fetchTranscriptFromYouTubeFrame(videoId, languages) {
+  const created = await openYouTubePopup(`https://www.youtube.com/embed/${encodeURIComponent(videoId)}?enablejsapi=1`);
+  const tabId = created.tabs?.[0]?.id;
+  if (created.id === void 0 || tabId === void 0) {
+    throw new StudioError("network", "The transcript request failed.");
+  }
+  try {
+    await waitForTabComplete(tabId);
+    const injected = await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: readCaptionXml,
+      args: [videoId, languages]
+    });
+    const payload = injected[0]?.result;
+    if (!payload) throw new StudioError("network", "The transcript request failed.");
+    if (!payload.ok) {
+      throw new StudioError(
+        payload.code === "no-captions" ? "no-captions" : "network",
+        payload.detail || "The transcript request failed."
+      );
+    }
+    return transcriptFromCaptionResult(videoId, payload);
+  } finally {
+    await chrome.windows.remove(created.id).catch(() => void 0);
+  }
+}
+async function openYouTubePopup(url) {
+  const created = await chrome.windows.create({ url, type: "popup", focused: false, width: 480, height: 320 });
+  if (!created) throw new StudioError("network", "The transcript request failed.");
+  return created;
+}
+function waitForTabComplete(tabId) {
+  return new Promise((resolve, reject) => {
+    let finished = false;
+    const finish = (error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      chrome.tabs.onUpdated.removeListener(listener);
+      if (error) reject(error);
+      else resolve();
+    };
+    const listener = (id, info) => {
+      if (id === tabId && info.status === "complete") finish();
+    };
+    const timeout = setTimeout(() => finish(new Error("The YouTube frame did not load.")), 2e4);
+    chrome.tabs.onUpdated.addListener(listener);
+    void chrome.tabs.get(tabId).then((tab) => {
+      if (tab.status === "complete") finish();
+    }).catch(() => void 0);
+  });
+}

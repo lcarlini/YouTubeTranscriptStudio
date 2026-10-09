@@ -83,7 +83,7 @@ flowchart LR
 1. The URL parser accepts `watch`, `youtu.be`, `embed`, `shorts`, `live`, and a bare 11-character id.
 2. Caption discovery calls YouTube's Innertube player endpoint and reads `captionTracks`. The chosen track is parsed from srv3 XML, classic timedtext, JSON3, WebVTT, or SRT.
 3. `npm run dev` proxies that request through Vite, because a page on another origin cannot read `youtube.com` directly.
-4. The extension has host permission for YouTube, so the side panel and service worker can read the same endpoint without a proxy. A button on the watch page opens the side panel.
+4. YouTube only returns caption tracks to `https://www.youtube.com`. The extension reads them inside a YouTube embed and passes the transcript to the side panel or the website. A button on the watch page opens the side panel.
 5. The first time you generate insights, chat, or a study set, a worker downloads `onnx-community/Qwen2.5-0.5B-Instruct`. Later visits use the Transformers.js browser cache.
 6. The worker asks for the high-performance WebGPU adapter (a discrete card such as an RTX 5070) and loads `dtype: "q4"` on it. If that 4-bit build cannot start, it tries `q4f16` on the same GPU. WASM `uint8` is used only when no real GPU adapter is available, or when both GPU builds fail to start.
 7. Chat retrieval picks transcript lines by word overlap, sends those excerpts to the model, and keeps the answer only when it cites a timestamp from the text.
@@ -168,9 +168,9 @@ History, edits, insights, flashcards, and chat live in IndexedDB and `localStora
 
 Caption fetching is separate from inference:
 
-- The extension requests captions from YouTube with its host permission.
+- The extension loads captions inside a YouTube embed, where YouTube allows the player request, and passes the transcript to the side panel or the website.
 - Local `npm run dev` requests captions through the Vite dev proxy on your machine.
-- The static GitHub Pages build cannot read `youtube.com` directly because YouTube does not send CORS headers. The page then tries a public Invidious caption endpoint, the installed extension, or a caption file you paste. Chat text is still not uploaded.
+- The static GitHub Pages build cannot call YouTube's player API itself. With the extension installed, the page asks that embed bridge for the transcript. Otherwise you can paste a caption file. Chat text is still not uploaded.
 
 ## Enable GitHub Pages
 

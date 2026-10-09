@@ -22,3 +22,12 @@ await build({
   target: "es2022",
   outfile: resolve(extensionRoot, "dist/content.js"),
 });
+
+await build({
+  entryPoints: [resolve(extensionRoot, "src/caption-bridge.ts")],
+  bundle: true,
+  format: "iife",
+  platform: "browser",
+  target: "es2022",
+  outfile: resolve(extensionRoot, "dist/caption-bridge.js"),
+});
