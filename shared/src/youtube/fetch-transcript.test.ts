@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { fetchYouTubeTranscript, pickCaptionTrack, rewriteYouTubeUrl } from "./fetch-transcript";
+import { fetchYouTubeTranscript, originalAudioLanguage, pickCaptionTrack, rewriteYouTubeUrl } from "./fetch-transcript";
 
 const player = {
   captions: {
@@ -28,6 +28,30 @@ describe("fetchYouTubeTranscript", () => {
       ["en"],
     );
     expect(track?.baseUrl).toBe("https://example.test/b");
+  });
+
+  it("prefers the original audio language over auto-dubbed tracks", () => {
+    const tracks = [
+      { baseUrl: "https://example.test/en", languageCode: "en", kind: "asr" },
+      { baseUrl: "https://example.test/pt", languageCode: "pt", kind: "asr" },
+      { baseUrl: "https://example.test/es", languageCode: "es", kind: "asr" },
+    ];
+    const original = originalAudioLanguage({
+      captions: { playerCaptionsTracklistRenderer: { captionTracks: tracks } },
+      streamingData: {
+        adaptiveFormats: [
+          { audioTrack: { id: "en-US.10", displayName: "English (US)", audioIsDefault: true, isAutoDubbed: true } },
+          { audioTrack: { id: "pt-BR.4", displayName: "Portuguese (BR) original", audioIsDefault: false } },
+        ],
+      },
+    });
+    expect(original).toBe("pt");
+    expect(pickCaptionTrack(tracks, ["en"], original)?.languageCode).toBe("pt");
+  });
+
+  it("matches regional caption codes against the base language", () => {
+    const track = pickCaptionTrack([{ baseUrl: "https://example.test/a", languageCode: "pt-BR" }], ["pt"]);
+    expect(track?.languageCode).toBe("pt-BR");
   });
 
   it("rejects tracks without a language code as unsupported", () => {

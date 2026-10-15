@@ -45,6 +45,11 @@ interface PlayerPayload {
       }>;
     };
   };
+  streamingData?: {
+    adaptiveFormats?: Array<{
+      audioTrack?: { id?: string; displayName?: string; audioIsDefault?: boolean; isAutoDubbed?: boolean };
+    }>;
+  };
 }
 
 const INVIDIOUS_INSTANCES = ["https://inv.nadeko.net"];
@@ -54,15 +59,33 @@ export function preferredCaptionLanguages(locale: string): string[] {
   return base === "en" ? ["en"] : [base, "en"];
 }
 
-export function pickCaptionTrack(tracks: CaptionTrack[], preferred: string[]): CaptionTrack | null {
+function baseLanguage(code: string | undefined): string {
+  return (code ?? "").toLowerCase().split(/[-_.]/)[0] ?? "";
+}
+
+/** The spoken language of the upload, ignoring YouTube's auto-dubbed audio tracks. */
+export function originalAudioLanguage(player: PlayerPayload): string {
+  const audio = (player.streamingData?.adaptiveFormats ?? [])
+    .map((format) => format.audioTrack)
+    .filter((track): track is NonNullable<typeof track> => Boolean(track?.id));
+  const original =
+    audio.find((track) => /original/i.test(track.displayName ?? "")) ??
+    audio.find((track) => !track.isAutoDubbed && track.audioIsDefault) ??
+    audio.find((track) => !track.isAutoDubbed);
+  if (original) return baseLanguage(original.id);
+  const tracks = player.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+  const asr = [...new Set(tracks.filter((track) => track.kind === "asr").map((track) => baseLanguage(track.languageCode)))];
+  return asr.length === 1 ? (asr[0] ?? "") : "";
+}
+
+export function pickCaptionTrack(tracks: CaptionTrack[], preferred: string[], originalLanguage = ""): CaptionTrack | null {
   const usable = tracks.filter((track) => track.baseUrl && /^[a-z]{2,3}(?:-[a-z0-9]+)?$/i.test(track.languageCode));
   if (usable.length === 0) return null;
-  for (const language of preferred) {
-    const manual = usable.find((track) => track.languageCode.toLowerCase() === language && track.kind !== "asr");
+  const wanted = [...new Set([originalLanguage, ...preferred.map(baseLanguage)].filter(Boolean))];
+  for (const language of wanted) {
+    const manual = usable.find((track) => baseLanguage(track.languageCode) === language && track.kind !== "asr");
     if (manual) return manual;
-  }
-  for (const language of preferred) {
-    const any = usable.find((track) => track.languageCode.toLowerCase().startsWith(language));
+    const any = usable.find((track) => baseLanguage(track.languageCode) === language);
     if (any) return any;
   }
   return usable[0] ?? null;
@@ -116,9 +139,10 @@ async function fetchDirect(
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({
-        context: { client: { clientName: "ANDROID", clientVersion: "20.10.38", hl: "en" } },
+        context: { client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 30, hl: "en" } },
         videoId,
       }),
+      credentials: "omit",
       signal: options.signal,
     });
   } catch (error) {
@@ -145,7 +169,7 @@ async function fetchDirect(
     throw new StudioError("no-captions", "This video does not expose captions.");
   }
 
-  const selected = pickCaptionTrack(tracks, preferred);
+  const selected = pickCaptionTrack(tracks, preferred, originalAudioLanguage(player));
   if (!selected) {
     throw new StudioError("unsupported-language", "No usable caption language was found.");
   }

@@ -1,9 +1,9 @@
 "use strict";
 (() => {
-  // shared/src/identity.ts
+  // ../shared/src/identity.ts
   var EXTENSION_ID = "ilghkafjpaojhclmnebepddhmndelhjl";
 
-  // shared/src/youtube/caption-frame.ts
+  // ../shared/src/youtube/caption-frame.ts
   var CAPTION_REQUEST = "yts-caption-request";
   var CAPTION_RESULT = "yts-caption-result";
   function isCaptionParentOrigin(origin, extensionId) {
@@ -18,7 +18,7 @@
     return url.hostname === "lcarlini.github.io" || url.hostname === "localhost" || url.hostname === "127.0.0.1";
   }
 
-  // extension/src/caption-bridge.ts
+  // src/caption-bridge.ts
   if (window.parent !== window) {
     const seen = /* @__PURE__ */ new Set();
     window.addEventListener("message", (event) => {

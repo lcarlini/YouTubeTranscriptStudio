@@ -1,4 +1,4 @@
-// shared/src/errors.ts
+// ../shared/src/errors.ts
 var StudioError = class extends Error {
   code;
   constructor(code, message) {
@@ -8,7 +8,7 @@ var StudioError = class extends Error {
   }
 };
 
-// shared/src/transcript/parse.ts
+// ../shared/src/transcript/parse.ts
 function decodeCaptionText(value) {
   return value.replace(/<br\s*\/?>/gi, " ").replace(/<[^>]+>/g, "").replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">").replace(/&quot;/gi, '"').replace(/&#39;|&apos;/gi, "'").replace(/&#(\d+);/g, (_, digits) => String.fromCodePoint(Number(digits))).replace(/&#x([0-9a-f]+);/gi, (_, hex) => String.fromCodePoint(Number.parseInt(hex, 16))).replace(/\s+/g, " ").trim();
 }
@@ -137,7 +137,7 @@ function parseTranscriptPayload(payload) {
   return parsePlainTranscript(payload).segments;
 }
 
-// shared/src/youtube/url.ts
+// ../shared/src/youtube/url.ts
 function canonicalWatchUrl(videoId, seconds) {
   const url = new URL("https://www.youtube.com/watch");
   url.searchParams.set("v", videoId);
@@ -150,7 +150,7 @@ function thumbnailUrl(videoId) {
   return `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
 }
 
-// shared/src/youtube/caption-frame.ts
+// ../shared/src/youtube/caption-frame.ts
 function transcriptFromCaptionResult(videoId, result) {
   if (!result.ok) {
     throw new StudioError(
@@ -174,82 +174,112 @@ function transcriptFromCaptionResult(videoId, result) {
   };
 }
 
-// shared/src/youtube/read-caption-xml.ts
+// ../shared/src/youtube/read-caption-xml.ts
 async function readCaptionXml(videoId, languages) {
-  try {
-    const rootLookup = () => typeof document === "undefined" ? null : document.getElementById("movie_player");
-    let player = null;
-    let discovery = "fetch";
-    if (typeof document !== "undefined") {
-      const deadline = Date.now() + 5e3;
-      while (Date.now() < deadline) {
-        const playerNode = rootLookup();
-        if (playerNode?.getPlayerResponse) {
-          try {
-            const candidate = playerNode.getPlayerResponse();
-            const ready = candidate?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
-            if (ready.some((track) => track.baseUrl && track.languageCode)) {
-              player = candidate ?? null;
-              discovery = "player";
-              break;
-            }
-            discovery = "player-empty";
-          } catch (error) {
-            discovery = error instanceof Error ? `player ${error.message}` : "player-throw";
-          }
-        } else {
-          discovery = `dom:${Boolean(playerNode)}`;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 200));
-      }
-    }
-    if (!player) {
-      const response = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({
-          context: { client: { clientName: "ANDROID", clientVersion: "20.10.38", hl: "en" } },
-          videoId
-        })
-      });
-      if (!response.ok) return { ok: false, code: "network", detail: `${discovery} http ${response.status}` };
-      player = await response.json();
-      discovery = `${discovery}+fetch`;
-    }
+  const notes = [];
+  const base = (code) => (code ?? "").toLowerCase().split(/[-_.]/)[0] ?? "";
+  const originalLanguage = (player) => {
+    const audio = (player?.streamingData?.adaptiveFormats ?? []).map((format) => format.audioTrack).filter((track) => Boolean(track?.id));
+    const original = audio.find((track) => /original/i.test(track.displayName ?? "")) ?? audio.find((track) => !track.isAutoDubbed && track.audioIsDefault) ?? audio.find((track) => !track.isAutoDubbed);
+    if (original) return base(original.id);
+    const tracks = player?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? [];
+    const asr = [...new Set(tracks.filter((track) => track.kind === "asr").map((track) => base(track.languageCode)))];
+    return asr.length === 1 ? asr[0] ?? "" : "";
+  };
+  const orderTracks = (player) => {
     const tracks = (player?.captions?.playerCaptionsTracklistRenderer?.captionTracks ?? []).filter(
       (track) => Boolean(track.baseUrl && track.languageCode)
     );
+    const original = originalLanguage(player);
     const preferred = (Array.isArray(languages) ? languages : ["en"]).map((language) => language.toLowerCase());
-    let selected;
-    for (const language of preferred) {
-      selected = tracks.find((track) => track.languageCode?.toLowerCase() === language && track.kind !== "asr");
-      if (selected) break;
+    const wanted = [...new Set([original, ...preferred.map(base)].filter(Boolean))];
+    const ordered = [];
+    const add = (track) => {
+      if (track && !ordered.includes(track)) ordered.push(track);
+    };
+    for (const language of wanted) {
+      add(tracks.find((track) => base(track.languageCode) === language && track.kind !== "asr"));
+      add(tracks.find((track) => base(track.languageCode) === language));
     }
-    if (!selected) {
-      for (const language of preferred) {
-        selected = tracks.find((track) => (track.languageCode ?? "").toLowerCase().startsWith(language));
-        if (selected) break;
+    tracks.forEach(add);
+    return ordered;
+  };
+  const download = async (player, label) => {
+    const tracks = orderTracks(player);
+    if (tracks.length === 0) {
+      notes.push(`${label}:no-tracks`);
+      return null;
+    }
+    for (const track of tracks.slice(0, 4)) {
+      try {
+        const response = await fetch(track.baseUrl, { credentials: "omit" });
+        if (!response.ok) {
+          notes.push(`${label}:${track.languageCode}:http ${response.status}`);
+          continue;
+        }
+        const xml = await response.text();
+        if (!xml.trim()) {
+          notes.push(`${label}:${track.languageCode}:empty`);
+          continue;
+        }
+        return {
+          ok: true,
+          xml,
+          languageCode: track.languageCode,
+          title: player?.videoDetails?.title?.trim() || "YouTube video",
+          author: player?.videoDetails?.author?.trim() || ""
+        };
+      } catch (error) {
+        notes.push(`${label}:${track.languageCode}:${error instanceof Error ? error.message : "throw"}`);
       }
     }
-    selected ??= tracks[0];
-    if (!selected?.baseUrl || !selected.languageCode) return { ok: false, code: "no-captions", detail: discovery };
-    const caption = await fetch(selected.baseUrl);
-    if (!caption.ok) return { ok: false, code: "network", detail: `${discovery} caption ${caption.status}` };
-    const xml = await caption.text();
-    if (!xml.trim()) return { ok: false, code: "no-captions", detail: `${discovery} empty` };
-    return {
-      ok: true,
-      xml,
-      languageCode: selected.languageCode,
-      title: player?.videoDetails?.title?.trim() || "YouTube video",
-      author: player?.videoDetails?.author?.trim() || ""
-    };
+    return null;
+  };
+  let sawTracks = false;
+  try {
+    const response = await fetch("https://www.youtube.com/youtubei/v1/player?prettyPrint=false", {
+      method: "POST",
+      credentials: "omit",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify({
+        context: { client: { clientName: "ANDROID", clientVersion: "20.10.38", androidSdkVersion: 30, hl: "en" } },
+        videoId
+      })
+    });
+    if (response.ok) {
+      const player = await response.json();
+      sawTracks ||= Boolean(player.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length);
+      const result = await download(player, "android");
+      if (result) return result;
+    } else {
+      notes.push(`android:http ${response.status}`);
+    }
   } catch (error) {
-    return { ok: false, code: "network", detail: error instanceof Error ? error.message : "throw" };
+    notes.push(`android:${error instanceof Error ? error.message : "throw"}`);
   }
+  if (typeof document !== "undefined") {
+    const deadline = Date.now() + 4e3;
+    while (Date.now() < deadline) {
+      const node = document.getElementById("movie_player");
+      let player = null;
+      try {
+        player = node?.getPlayerResponse?.() ?? null;
+      } catch {
+        player = null;
+      }
+      if (player?.captions?.playerCaptionsTracklistRenderer?.captionTracks?.length) {
+        sawTracks = true;
+        const result = await download(player, "web");
+        if (result) return result;
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 200));
+    }
+  }
+  return { ok: false, code: sawTracks ? "network" : "no-captions", detail: notes.join("; ") };
 }
 
-// extension/src/background.ts
+// src/background.ts
 chrome.runtime.onInstalled.addListener(() => {
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => void 0);
 });
