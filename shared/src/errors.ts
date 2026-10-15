@@ -8,7 +8,9 @@ export type ErrorCode =
   | "model-runtime"
   | "cache"
   | "extension-permission"
-  | "empty-transcript";
+  | "empty-transcript"
+  | "remote-unreachable"
+  | "remote-api";
 
 export class StudioError extends Error {
   readonly code: ErrorCode;

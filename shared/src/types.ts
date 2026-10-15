@@ -1,6 +1,7 @@
 export type Locale = "en" | "pt-BR" | "es";
 
 export type TabId = "transcript" | "insights" | "chat" | "study" | "export";
+export type Theme = "dark" | "light";
 
 export interface TranscriptSegment {
   id: string;
@@ -9,9 +10,21 @@ export interface TranscriptSegment {
   text: string;
 }
 
+export interface KeyPoint {
+  start: number;
+  title: string;
+  text: string;
+}
+
 export interface Insights {
   tldr: string;
   takeaways: string[];
+  /** Timestamped key moments; used when the summary came from the API. */
+  points?: KeyPoint[];
+  /** Where the summary was produced: "local" (browser) or the API model name. */
+  engine?: string;
+  /** Format revision; summaries saved before titled key moments existed have none. */
+  version?: number;
   chapters: Chapter[];
   glossary: GlossaryEntry[];
   actionItems: string[];

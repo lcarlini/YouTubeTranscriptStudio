@@ -146,6 +146,7 @@ async function loadModel(): Promise<void> {
   }
 
   let lastError: unknown;
+  const failures: string[] = [];
   for (const attempt of attempts) {
     try {
       device = attempt.device;
@@ -174,6 +175,7 @@ async function loadModel(): Promise<void> {
       return;
     } catch (error) {
       lastError = error;
+      failures.push(`${attempt.device}/${attempt.dtype}: ${error instanceof Error ? error.message : String(error)}`);
       generator = null;
       ready = false;
       device = null;
@@ -182,6 +184,7 @@ async function loadModel(): Promise<void> {
 
   device = null;
   postProgress("error", null);
+  if (failures.length > 0) throw new Error(failures.join(" | "));
   throw lastError instanceof Error ? lastError : new Error("The local model could not be loaded.");
 }
 
@@ -195,9 +198,10 @@ async function generate(system: string, user: string, maxNewTokens: number): Pro
     ],
     {
       max_new_tokens: maxNewTokens,
-      temperature: 0.2,
-      do_sample: true,
-      top_p: 0.9,
+      // Greedy decoding: a small model summarizes more faithfully without sampling noise.
+      temperature: 0,
+      do_sample: false,
+      top_p: 1,
       repetition_penalty: 1.05,
     },
   );

@@ -1,5 +1,6 @@
-import type { Citation, Chapter, GlossaryEntry, Insights, QuizQuestion, StudyPack } from "../types";
+import type { Citation, Chapter, GlossaryEntry, Insights, KeyPoint, QuizQuestion, StudyPack } from "../types";
 import { parseClock } from "../transcript/time";
+import { StudioError } from "../errors";
 
 const CLOCK = String.raw`(?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?`;
 const STAMP = new RegExp(String.raw`\[(${CLOCK})(?:\s*[-–]\s*(${CLOCK}))?\]`, "g");
@@ -19,6 +20,92 @@ export function extractGeneratedText(output: unknown): string {
     return typeof assistant?.content === "string" ? assistant.content : "";
   }
   return "";
+}
+
+/** Cleans a plain-prose answer: drops code fences and any label the model added on its own. */
+export function cleanSummaryText(raw: string): string {
+  const text = stripFences(raw)
+    // Chatty models open with "Here is the summary:" or "Aqui está a sinopse do vídeo:"; that line is not content.
+    .replace(/^\s*(?:here is|here's|aqui est[áa]|aqu[íi] tienes|aqu[íi] est[áa])[^:.\n]{0,120}:\s*/i, "")
+    .replace(/^\s*(?:summary|overview|tl;?dr|resumo|visão geral|resumen|visión general)\s*:\s*/i, "")
+    .replace(/\s+/g, " ")
+    .replace(/^["“”']+|["“”']+$/g, "")
+    .trim();
+  return dedupeSentences(text);
+}
+
+/** Small models often repeat the same sentence; keep only the first occurrence. */
+function dedupeSentences(text: string): string {
+  const seen = new Set<string>();
+  const kept: string[] = [];
+  for (const sentence of text.match(/[^.!?]+[.!?]*\s*/g) ?? [text]) {
+    const key = sentence.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    kept.push(sentence.trim());
+  }
+  return kept.join(" ");
+}
+
+export interface RemoteSummary {
+  overview: string;
+  points: KeyPoint[];
+}
+
+function parseJsonObject(raw: string): Record<string, unknown> | null {
+  const text = stripFences(raw);
+  const start = text.indexOf("{");
+  const end = text.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+  try {
+    const value: unknown = JSON.parse(text.slice(start, end + 1));
+    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Reads the API's JSON answer. Points without a usable time or title are dropped, not guessed. */
+export function parseRemoteSummary(raw: string, locate?: (text: string) => number | null): RemoteSummary {
+  const data = parseJsonObject(raw);
+  if (!data) throw new StudioError("remote-api", "The API answer was not valid JSON.");
+  const overview = typeof data.overview === "string" ? cleanSummaryText(data.overview) : "";
+  const list = Array.isArray(data.points) ? data.points : [];
+  const points: KeyPoint[] = [];
+  for (const item of list) {
+    // Small models sometimes return a bare sentence without a time; place it where the transcript says it.
+    if (typeof item === "string") {
+      const text = cleanSummaryText(item);
+      const start = text ? (locate?.(text) ?? null) : null;
+      if (start !== null) points.push({ start, title: "", text });
+      continue;
+    }
+    if (!item || typeof item !== "object") continue;
+    const record = item as Record<string, unknown>;
+    const title = typeof record.title === "string" ? cleanSummaryText(record.title) : "";
+    const text = typeof record.text === "string" ? cleanSummaryText(record.text) : "";
+    const start = timeValue(record.time) ?? (text ? (locate?.(`${title} ${text}`) ?? null) : null);
+    if (start === null || !text) continue;
+    points.push({ start, title, text });
+  }
+  points.sort((a, b) => a.start - b.start);
+  return { overview, points };
+}
+
+function timeValue(value: unknown): number | null {
+  if (typeof value === "number" && Number.isFinite(value) && value >= 0) return value;
+  if (typeof value !== "string") return null;
+  const match = value.match(/\d{1,2}(?::\d{1,2}){1,2}/);
+  return match ? parseClock(match[0]) : null;
+}
+
+/** Timestamps the model wrote as [mm:ss] or [h:mm:ss] inside an answer. */
+export function timestampsIn(text: string): number[] {
+  const found: number[] = [];
+  for (const match of text.matchAll(/\[(\d{1,2}(?::\d{2}){1,2})\]/g)) {
+    found.push(parseClock(match[1]));
+  }
+  return found;
 }
 
 export interface ParsedChat {

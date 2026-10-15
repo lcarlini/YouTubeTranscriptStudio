@@ -35,8 +35,10 @@ export default defineConfig({
         const source = resolve(root, "../node_modules/@huggingface/transformers/dist");
         const destination = resolve(root, "dist/wasm");
         mkdirSync(destination, { recursive: true });
+        // ONNX Runtime loads its WASM glue as a module (ort-wasm-*.mjs) next to the .wasm file.
         for (const file of readdirSync(source)) {
-          if (file.endsWith(".wasm")) copyFileSync(join(source, file), join(destination, file));
+          const isOnnxRuntime = /^ort-wasm.*\.(wasm|mjs)$/.test(file);
+          if (file.endsWith(".wasm") || isOnnxRuntime) copyFileSync(join(source, file), join(destination, file));
         }
       },
     },

@@ -1,10 +1,14 @@
-import type { Locale, TabId } from "../types";
+import type { Locale, TabId, Theme } from "../types";
 
 export const PREF_LANGUAGE = "yts.language";
 export const PREF_TAB = "yts.tab";
 export const PREF_INCLUDE_CHAT = "yts.includeChat";
+export const PREF_THEME = "yts.theme";
+export const PREF_API_URL = "yts.api.url";
+export const PREF_API_MODEL = "yts.api.model";
+export const PREF_API_KEY = "yts.api.key";
 
-const TABS: TabId[] = ["transcript", "insights", "chat", "study", "export"];
+const TABS: TabId[] = ["insights", "transcript", "chat", "study", "export"];
 
 export function detectLocale(language: string | null | undefined): Locale {
   const value = (language ?? "").toLowerCase();
@@ -43,5 +47,31 @@ export function initialLocale(): Locale {
 }
 
 export function initialTab(): TabId {
-  return readStoredTab(localGet(PREF_TAB)) ?? "transcript";
+  return readStoredTab(localGet(PREF_TAB)) ?? "insights";
+}
+
+/** Dark is the default; light is only used when the user picked it. */
+export function initialTheme(): Theme {
+  return localGet(PREF_THEME) === "light" ? "light" : "dark";
+}
+
+export interface StoredRemote {
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+}
+
+/** Empty URL means "no API": the app then uses the in-browser model. */
+export function readStoredRemote(): StoredRemote {
+  return {
+    baseUrl: localGet(PREF_API_URL) ?? "",
+    model: localGet(PREF_API_MODEL) ?? "",
+    apiKey: localGet(PREF_API_KEY) ?? "",
+  };
+}
+
+export function writeStoredRemote(value: StoredRemote): void {
+  localSet(PREF_API_URL, value.baseUrl.trim());
+  localSet(PREF_API_MODEL, value.model.trim());
+  localSet(PREF_API_KEY, value.apiKey.trim());
 }

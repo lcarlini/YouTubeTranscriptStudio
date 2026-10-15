@@ -64,6 +64,7 @@ export class LocalModelClient {
       if (!pending) return;
       this.pending.delete(data.id);
       if (data.type === "error") {
+        console.warn(`[YTS] local model ${data.code}: ${data.message}`);
         const error = new StudioError(data.code === "model-download" ? "model-download" : "model-runtime", data.message);
         pending.reject(error);
         return;

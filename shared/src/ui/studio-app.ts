@@ -1,16 +1,38 @@
 import {
   CHAT_SYSTEM,
-  INSIGHTS_SYSTEM,
-  MERGE_SYSTEM,
+  OVERVIEW_SYSTEM,
+  PART_SYSTEM,
+  REMOTE_CHAT_SYSTEM,
+  REMOTE_OVERVIEW_SYSTEM,
+  REMOTE_PART_SYSTEM,
+  REMOTE_SUMMARY_SYSTEM,
   STUDY_SYSTEM,
   buildChatUserPrompt,
   buildInsightsUserPrompt,
   buildMergeUserPrompt,
+  buildRemoteChatUserPrompt,
+  buildRemoteOverviewUserPrompt,
+  buildRemoteSummaryUserPrompt,
+  languageName,
   buildStudyUserPrompt,
 } from "../ai/prompts";
-import { buildProcessingChunks, condenseTranscript } from "../ai/chunk";
+import { condenseTranscript, transcriptParts } from "../ai/chunk";
 import { LocalModelClient } from "../ai/client";
-import { mergeInsights, parseChatResponse, parseInsights, parseStudyPack } from "../ai/parse-model";
+import {
+  isModelListed,
+  remoteComplete,
+  remoteEnabled,
+  remoteModels,
+  normalizeBaseUrl,
+  type RemoteSettings,
+} from "../ai/remote";
+import {
+  cleanSummaryText,
+  parseChatResponse,
+  parseRemoteSummary,
+  parseStudyPack,
+  timestampsIn,
+} from "../ai/parse-model";
 import { nearestSegment, retrieveSegments } from "../ai/retrieve";
 import {
   downloadTextFile,
@@ -23,7 +45,7 @@ import {
   exportVtt,
   fileSlug,
 } from "../export/exporters";
-import { isStudioError } from "../errors";
+import { StudioError, isStudioError } from "../errors";
 import type { MessageKey } from "../i18n";
 import { translate } from "../i18n";
 import { clearVideos, deleteVideo, listVideos, saveVideo } from "../storage/history";
@@ -31,21 +53,35 @@ import {
   PREF_INCLUDE_CHAT,
   PREF_LANGUAGE,
   PREF_TAB,
+  PREF_THEME,
   initialLocale,
   initialTab,
+  initialTheme,
   localGet,
   localSet,
+  readStoredRemote,
+  writeStoredRemote,
 } from "../storage/preferences";
 import { findMatches, rangesForSegment } from "../transcript/search";
 import { parsePlainTranscript } from "../transcript/parse";
-import { formatTimestamp } from "../transcript/time";
-import type { ChatMessage, Citation, TabId, VideoRecord } from "../types";
+import { formatTimestamp, parseClock } from "../transcript/time";
+import type { ChatMessage, Citation, Insights, KeyPoint, TabId, Theme, TranscriptSegment, VideoRecord } from "../types";
 import { fetchYouTubeTranscript, preferredCaptionLanguages } from "../youtube/fetch-transcript";
 import type { FetchedTranscript } from "../youtube/fetch-transcript";
 import { canonicalWatchUrl, parseYouTubeVideoId, thumbnailUrl } from "../youtube/url";
 import { appendHighlighted, clear, copyText, el, formatMegabytes, isEditableTarget } from "./dom";
+import { hasTimes, parseInline, parseRichText, type RichBlock, type RichInline } from "./rich-text";
 
-const TABS: TabId[] = ["transcript", "insights", "chat", "study", "export"];
+const TABS: TabId[] = ["insights", "transcript", "chat", "study", "export"];
+/** Questions like "resuma este vídeo" are answered from the summary, not from keyword matches. */
+const SUMMARY_INTENT = /\b(resum\w*|summar\w*|resumen\w*|tl;?dr|overview)\b/i;
+/** Transcript text per API request. Portuguese with timestamps is about 2.9 characters per token, so this is about 5k tokens and leaves room for the 8k-token context. */
+/** Chat sees this much transcript; answers are short, so the longer context costs little. */
+const REMOTE_CONTEXT_CHARS = 14000;
+/** Summaries read the video in smaller parts: a local GPU writes much faster with about 2k tokens of context. */
+const REMOTE_PART_CHARS = 6000;
+const SUMMARY_VERSION = 2;
+const CLOCK_PREFIX = /^\[((?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?)\]\s*/;
 const REPO = "https://github.com/lcarlini/YouTubeTranscriptStudio";
 const PAGES = "https://lcarlini.github.io/YouTubeTranscriptStudio/";
 
@@ -58,6 +94,8 @@ export interface StudioHost {
   tryCaptionFrame?: (videoId: string, languages: string[]) => Promise<FetchedTranscript | null>;
   tryExtensionFetch?: (videoId: string, languages: string[]) => Promise<FetchedTranscript | null>;
   onLocaleChange?: (locale: "en" | "pt-BR" | "es") => void;
+  /** Extension only: asks the browser for permission to call a user-chosen API origin. */
+  requestOrigin?: (url: string) => Promise<boolean>;
 }
 
 export function mountStudio(root: HTMLElement, host: StudioHost): void {
@@ -67,6 +105,8 @@ export function mountStudio(root: HTMLElement, host: StudioHost): void {
 class StudioApp {
   private locale = initialLocale();
   private tab = initialTab();
+  private theme: Theme = initialTheme();
+  private insightsProgress = "";
   private urlInput = "";
   private phase: "idle" | "loading" | "ready" | "error" = "idle";
   private formError: string | null = null;
@@ -89,6 +129,8 @@ class StudioApp {
   private confirmDeleteId: string | null = null;
   private saveTimer = 0;
   private readonly model: LocalModelClient;
+  private remote: RemoteSettings = readStoredRemote();
+  private paintedVideoId: string | null | undefined = undefined;
   private readonly nodes: Shell;
 
   constructor(
@@ -100,6 +142,7 @@ class StudioApp {
     this.nodes = this.build();
     this.model = new LocalModelClient(() => this.paintModel(), host.wasmPaths);
     this.applyI18n();
+    this.applyTheme();
     this.setTab(this.tab);
     this.paintModel();
     this.bind();
@@ -128,7 +171,7 @@ class StudioApp {
     const videoMeta = el("p", { class: "muted" });
     const insightsBody = el("div", { class: "stack" });
     const chatLog = el("div", { class: "chat-log", role: "log", "aria-live": "polite" });
-    const chatInput = el("textarea", { "data-i18n-placeholder": "askPlaceholder" });
+    const chatInput = el("textarea", { "data-i18n-placeholder": "askPlaceholder", rows: "1" });
     const studyBody = el("div", { class: "stack" });
     const modelPill = el("p", { class: "model-pill", role: "status", "data-i18n-label": "statusLabel" });
     const historyList = el("div", { class: "history-list" });
@@ -138,6 +181,13 @@ class StudioApp {
     const cacheValue = el("strong");
     const deviceValue = el("strong");
     const fallback = el("p", { class: "muted" });
+    const apiUrl = el("input", { type: "url", autocomplete: "off", spellcheck: "false", "data-i18n-placeholder": "apiUrlPlaceholder" });
+    apiUrl.value = this.remote.baseUrl;
+    const apiModel = el("input", { type: "text", autocomplete: "off", spellcheck: "false", "data-i18n-placeholder": "apiModelPlaceholder" });
+    apiModel.value = this.remote.model;
+    const apiKey = el("input", { type: "password", autocomplete: "off", "data-i18n-placeholder": "apiKeyPlaceholder" });
+    apiKey.value = this.remote.apiKey;
+    const apiStatus = el("p", { class: "muted", role: "status" });
     const tabs = {} as Record<TabId, HTMLButtonElement>;
     const panels = {} as Record<TabId, HTMLElement>;
 
@@ -180,26 +230,31 @@ class StudioApp {
       estimated,
       segmentList,
     );
+    const insightsCopy = el("button", { class: "btn btn-ghost", type: "button", "data-action": "copy-summary", "data-i18n": "copySummary" });
+    insightsCopy.disabled = true;
     panels.insights.append(
       el("div", { class: "toolbar" }, [
         el("button", { class: "btn btn-primary", type: "button", "data-action": "insights", "data-i18n": "generateInsights" }),
+        insightsCopy,
       ]),
       insightsBody,
     );
     panels.chat.append(
       chatLog,
-      el("div", { class: "inline" }, [
-        el("span", { class: "muted", "data-i18n": "suggestions" }),
-        ...(["suggestSummary", "suggestTopics", "suggestExplain", "suggestStudy"] as const).map((key) =>
-          el("button", { class: "btn btn-ghost", type: "button", "data-action": "suggest", "data-suggest": key, "data-i18n": key }),
-        ),
-      ]),
-      el("form", { class: "composer" }, [
-        el("label", { class: "field" }, [
-          el("span", { "data-i18n": "askLabel" }),
-          chatInput,
+      el("div", { class: "chat-dock" }, [
+        el("div", { class: "suggestions" }, [
+          el("span", { class: "visually-hidden", "data-i18n": "suggestions" }),
+          ...(["suggestSummary", "suggestTopics", "suggestExplain", "suggestStudy"] as const).map((key) =>
+            el("button", { class: "chip", type: "button", "data-action": "suggest", "data-suggest": key, "data-i18n": key }),
+          ),
         ]),
-        el("button", { class: "btn btn-primary", type: "submit", "data-i18n": "send" }),
+        el("form", { class: "composer" }, [
+          el("label", { class: "composer-field" }, [
+            el("span", { class: "visually-hidden", "data-i18n": "askLabel" }),
+            chatInput,
+          ]),
+          el("button", { class: "btn btn-primary send", type: "submit", "data-i18n": "send" }),
+        ]),
       ]),
     );
     panels.study.append(
@@ -242,10 +297,28 @@ class StudioApp {
     dialog.append(
       el("div", { class: "settings-card" }, [
         el("h2", { "data-i18n": "settingsTitle" }),
+        el("label", { class: "field lang" }, [
+          el("span", { "data-i18n": "languageLabel" }),
+          el("select", { "data-i18n-label": "languageLabel" }, [
+            el("option", { value: "en" }, ["English"]),
+            el("option", { value: "pt-BR" }, ["Português (Brasil)"]),
+            el("option", { value: "es" }, ["Español"]),
+          ]),
+        ]),
         el("p", { "data-i18n": "settingsIntro" }),
         el("p", {}, [el("span", { "data-i18n": "statusLabel" }), " ", el("strong", { class: "settings-status" })]),
         el("p", {}, [el("span", { "data-i18n": "modelDevice" }), " ", deviceValue]),
         fallback,
+        el("h3", { "data-i18n": "apiTitle" }),
+        el("p", { class: "muted", "data-i18n": "apiIntro" }),
+        el("label", { class: "field" }, [el("span", { "data-i18n": "apiUrlLabel" }), apiUrl]),
+        el("label", { class: "field" }, [el("span", { "data-i18n": "apiModelLabel" }), apiModel]),
+        el("label", { class: "field" }, [el("span", { "data-i18n": "apiKeyLabel" }), apiKey]),
+        apiStatus,
+        el("div", { class: "inline" }, [
+          el("button", { class: "btn btn-primary", type: "button", "data-action": "api-save", "data-i18n": "apiSave" }),
+          el("button", { class: "btn btn-ghost", type: "button", "data-action": "api-test", "data-i18n": "apiTest" }),
+        ]),
         el("p", {}, [el("span", { "data-i18n": "cacheUsage" }), " ", cacheValue]),
         el("div", { class: "inline" }, [
           el("button", { class: "btn btn-primary", type: "button", "data-action": "load-model", "data-i18n": "loadModel" }),
@@ -263,6 +336,7 @@ class StudioApp {
     );
 
     const toasts = el("div", { class: "toast-region", "aria-live": "polite" });
+    const themeButton = el("button", { class: "btn btn-ghost theme-toggle", type: "button", "data-action": "theme" });
     this.root.append(
       el("a", { class: "skip", href: "#content", "data-i18n": "skip" }),
       el("header", { class: "topbar" }, [
@@ -272,16 +346,8 @@ class StudioApp {
         ]),
         el("div", { class: "top-actions" }, [
           modelPill,
-          el("label", { class: "lang" }, [
-            el("span", { "data-i18n": "languageLabel" }),
-            el("select", { "data-i18n-label": "languageLabel" }, [
-              el("option", { value: "en" }, ["English"]),
-              el("option", { value: "pt-BR" }, ["Português (Brasil)"]),
-              el("option", { value: "es" }, ["Español"]),
-            ]),
-          ]),
+          themeButton,
           el("button", { class: "btn btn-ghost", type: "button", "data-action": "settings", "data-i18n": "settings" }),
-          el("a", { class: "btn btn-ghost", href: REPO, target: "_blank", rel: "noreferrer", "data-i18n": "github" }),
         ]),
       ]),
       el("main", { id: "content" }, [
@@ -306,6 +372,8 @@ class StudioApp {
               : null,
           ]),
           formError,
+          // The summary sits right under the URL field; history and pasting come after it.
+          workspace,
           el("details", { class: "paste" }, [
             el("summary", { "data-i18n": "pasteSummary" }),
             el("p", { class: "muted", "data-i18n": "pasteHelp" }),
@@ -317,15 +385,14 @@ class StudioApp {
               ]),
             ]),
           ]),
-          el("section", { class: "history" }, [
+          el("details", { class: "history", open: true }, [
+            el("summary", { "data-i18n": "recentTitle" }),
             el("div", { class: "toolbar" }, [
-              el("h2", { "data-i18n": "recentTitle" }),
+              el("p", { class: "muted", "data-i18n": "historyNote" }),
               el("button", { class: "btn btn-ghost", type: "button", "data-action": "clear-history", "data-i18n": "clearHistory" }),
             ]),
-            el("p", { class: "muted", "data-i18n": "historyNote" }),
             historyList,
           ]),
-          workspace,
         ]),
       ]),
       el("footer", { class: "footer" }, [
@@ -362,17 +429,24 @@ class StudioApp {
       videoImage: videoHead.querySelector("img") as HTMLImageElement,
       insightsBody,
       insightsButton: panels.insights.querySelector("[data-action='insights']") as HTMLButtonElement,
+      insightsCopy,
+      themeButton,
       chatLog,
       chatInput,
       studyBody,
       studyButton: panels.study.querySelector("[data-action='study']") as HTMLButtonElement,
       modelPill,
+      history: this.root.querySelector(".history") as HTMLDetailsElement,
       historyList,
       includeChat,
       dialog,
       cacheValue,
       deviceValue,
       fallback,
+      apiUrl,
+      apiModel,
+      apiKey,
+      apiStatus,
       settingsStatus: dialog.querySelector(".settings-status") as HTMLElement,
       tabs,
       panels,
@@ -406,6 +480,10 @@ class StudioApp {
       this.nodes.dialog.showModal();
     } else if (action === "close-settings") {
       this.nodes.dialog.close();
+    } else if (action === "api-save") {
+      await this.saveRemote();
+    } else if (action === "api-test") {
+      await this.testRemote();
     } else if (action === "use-current") {
       await this.useCurrentVideo(true);
     } else if (action === "copy-all") {
@@ -420,6 +498,12 @@ class StudioApp {
       this.moveMatch(-1);
     } else if (action === "next-match") {
       this.moveMatch(1);
+    } else if (action === "theme") {
+      this.theme = this.theme === "dark" ? "light" : "dark";
+      localSet(PREF_THEME, this.theme);
+      this.applyTheme();
+    } else if (action === "copy-summary") {
+      await this.copySummary();
     } else if (action === "insights") {
       await this.runInsights();
     } else if (action === "study") {
@@ -570,6 +654,11 @@ class StudioApp {
     if (target instanceof HTMLElement && target.dataset.segmentId && event.key === "Enter" && !event.shiftKey) {
       event.preventDefault();
     }
+    if (target === this.nodes.chatInput && event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      this.nodes.chatInput.form?.requestSubmit();
+      return;
+    }
     if (!(target instanceof HTMLElement) || target.getAttribute("role") !== "tab") return;
     const current = TABS.indexOf(this.tab);
     if (event.key !== "ArrowRight" && event.key !== "ArrowLeft" && event.key !== "Home" && event.key !== "End") return;
@@ -623,8 +712,20 @@ class StudioApp {
     }
     try {
       const languages = preferredCaptionLanguages(this.locale);
-      let fetched = this.host.tryCaptionFrame ? await this.host.tryCaptionFrame(videoId, languages) : null;
-      fetched ??= this.host.tryExtensionFetch ? await this.host.tryExtensionFetch(videoId, languages) : null;
+      // Each strategy may fail on its own; a failure must not stop the next one.
+      let fetched: FetchedTranscript | null = null;
+      for (const [name, strategy] of [
+        ["caption-frame", this.host.tryCaptionFrame],
+        ["extension-fetch", this.host.tryExtensionFetch],
+      ] as const) {
+        if (!strategy) continue;
+        try {
+          fetched = await strategy(videoId, languages);
+        } catch (error) {
+          console.warn(`[YTS] ${name} failed`, error);
+        }
+        if (fetched) break;
+      }
       fetched ??= await fetchYouTubeTranscript(videoId, {
         preferredLanguages: languages,
         youtubeProxyPrefix: this.host.devProxy ? "/yt-proxy" : null,
@@ -640,7 +741,8 @@ class StudioApp {
       await this.persist();
       await this.refreshHistory();
       this.toast(this.t("savedInBrowser"), "ok");
-      void this.warmModel();
+      // The summary is the first thing the user reads, so it starts as soon as the transcript is ready.
+      if (!this.video.insights) void this.runInsights();
     } catch (error) {
       this.phase = this.video ? "ready" : "error";
       this.setFormError(this.t(messageKey(error)));
@@ -693,7 +795,9 @@ class StudioApp {
     await this.refreshHistory();
     this.paintSession();
     this.toast(this.t("savedInBrowser"), "ok");
-    void this.warmModel();
+    // With an API configured the in-browser model is never used, so do not
+    // load it on the GPU in the background (it competes with the display).
+    if (!remoteEnabled(this.remote)) void this.warmModel();
   }
 
   private async useCurrentVideo(reportEmpty: boolean): Promise<void> {
@@ -715,33 +819,166 @@ class StudioApp {
     await this.useCurrentVideo(false);
   }
 
+  private readRemoteForm(): RemoteSettings {
+    return {
+      baseUrl: this.nodes.apiUrl.value.trim(),
+      model: this.nodes.apiModel.value.trim(),
+      apiKey: this.nodes.apiKey.value.trim(),
+    };
+  }
+
+  /** An empty URL switches the app back to the in-browser model. */
+  private async saveRemote(): Promise<void> {
+    const next = this.readRemoteForm();
+    if (next.baseUrl) {
+      try {
+        next.baseUrl = normalizeBaseUrl(next.baseUrl);
+      } catch {
+        this.nodes.apiStatus.textContent = this.t("apiBadUrl");
+        return;
+      }
+      if (!next.model) {
+        this.nodes.apiStatus.textContent = this.t("apiNeedsModel");
+        return;
+      }
+      // Asked before any await, so the browser still treats the click as a user gesture.
+      const granted = this.host.requestOrigin ? await this.host.requestOrigin(next.baseUrl) : true;
+      if (!granted) {
+        this.nodes.apiStatus.textContent = this.t("apiPermissionDenied");
+        return;
+      }
+    }
+    this.remote = next;
+    writeStoredRemote(next);
+    this.nodes.apiUrl.value = next.baseUrl;
+    this.nodes.apiStatus.textContent = next.baseUrl
+      ? this.t("apiSaved", { model: next.model })
+      : this.t("apiCleared");
+    this.paintModel();
+  }
+
+  private async testRemote(): Promise<void> {
+    const form = this.readRemoteForm();
+    if (!form.baseUrl) {
+      this.nodes.apiStatus.textContent = this.t("apiNoUrl");
+      return;
+    }
+    this.nodes.apiStatus.textContent = this.t("apiTesting");
+    try {
+      const settings = { ...form, baseUrl: normalizeBaseUrl(form.baseUrl) };
+      const ids = await remoteModels(settings);
+      this.nodes.apiStatus.textContent = !form.model || isModelListed(ids, form.model)
+        ? this.t("apiOk", { count: ids.length })
+        : this.t("apiModelMissing", { model: form.model, list: ids.slice(0, 5).join(", ") || "-" });
+    } catch (error) {
+      this.nodes.apiStatus.textContent = this.t(messageKey(error));
+    }
+  }
+
+  /**
+   * Reads every part of the transcript (not a sample), then merges the partial
+   * summaries in batches until one final summary remains.
+   */
   private async runInsights(): Promise<void> {
     if (!this.video || this.insightsBusy) return;
+    const video = this.video;
     this.insightsBusy = true;
+    this.insightsProgress = "";
     this.paintInsights();
     try {
-      const chunks = buildProcessingChunks(this.video.segments);
-      const partials = [];
-      for (const chunk of chunks) {
-        const raw = await this.model.generate(INSIGHTS_SYSTEM, buildInsightsUserPrompt(chunk.text), 420);
-        const parsed = parseInsights(raw);
-        if (parsed) partials.push(parsed);
-      }
-      if (partials.length === 0) throw new Error("empty insights");
-      let merged = mergeInsights(partials);
-      if (partials.length > 1) {
-        const notes = partials.map((part, index) => `Part ${index + 1}\nTLDR: ${part.tldr}\nTAKEAWAYS:\n${part.takeaways.map((item) => `- ${item}`).join("\n")}`).join("\n\n");
-        const combined = parseInsights(await this.model.generate(MERGE_SYSTEM, buildMergeUserPrompt(notes), 480));
-        if (combined) merged = combined;
-      }
-      this.video.insights = merged;
+      video.insights = remoteEnabled(this.remote)
+        ? await this.summarizeWithApi(video)
+        : await this.summarizeLocally(video);
       await this.persist();
     } catch (error) {
       this.toast(this.t(isStudioError(error) ? messageKey(error) : "insightsFailed"), "err");
     } finally {
       this.insightsBusy = false;
+      this.insightsProgress = "";
       this.paintInsights();
     }
+  }
+
+  /** The API model reads the whole transcript in one request; very long videos go in a few parts. */
+  private async summarizeWithApi(video: VideoRecord): Promise<Insights> {
+    const engine = this.remote.model;
+    // Points without a time are placed at the transcript line that best matches them.
+    const locate = (text: string): number | null => retrieveSegments(video.segments, text, 1)[0]?.start ?? null;
+    const language = languageName(video.captionLanguage);
+    const parts = transcriptParts(video.segments, REMOTE_PART_CHARS);
+    const points: KeyPoint[] = [];
+    let overview = "";
+    if (parts.length === 1) {
+      this.insightsProgress = this.t("summaryRemote", { model: engine });
+      this.paintInsights();
+      const raw = await remoteComplete(this.remote, REMOTE_SUMMARY_SYSTEM, buildRemoteSummaryUserPrompt(parts[0].text, language), { maxTokens: 1200, json: true });
+      const parsed = parseRemoteSummary(raw, locate);
+      overview = parsed.overview;
+      points.push(...parsed.points);
+    } else {
+      for (const [index, part] of parts.entries()) {
+        this.insightsProgress = this.t("summaryReading", { current: index + 1, total: parts.length });
+        this.paintInsights();
+        const raw = await remoteComplete(this.remote, REMOTE_PART_SYSTEM, buildRemoteSummaryUserPrompt(part.text, language), { maxTokens: 400, json: true });
+        points.push(...parseRemoteSummary(raw, locate).points);
+      }
+      this.insightsProgress = this.t("summaryMerging");
+      this.paintInsights();
+      const notes = points.map((point) => `[${formatTimestamp(point.start)}] ${point.title}: ${point.text}`).join("\n");
+      overview = cleanSummaryText(await remoteComplete(this.remote, REMOTE_OVERVIEW_SYSTEM, buildRemoteOverviewUserPrompt(notes, language), { maxTokens: 400 }));
+    }
+    if (points.length === 0 && !overview) throw new StudioError("remote-api", "The API returned no summary.");
+    return { tldr: overview, takeaways: [], points, engine, version: SUMMARY_VERSION, chapters: [], glossary: [], actionItems: [], followUps: [] };
+  }
+
+  private async summarizeLocally(video: VideoRecord): Promise<Insights> {
+    const parts = transcriptParts(video.segments);
+    const points: Array<{ start: number; text: string }> = [];
+    for (const [index, part] of parts.entries()) {
+      this.insightsProgress = this.t("summaryReading", { current: index + 1, total: parts.length });
+      this.paintInsights();
+      const text = cleanSummaryText(await this.model.generate(PART_SYSTEM, buildInsightsUserPrompt(part.text), 160));
+      if (text) points.push({ start: part.segments[0].start, text });
+    }
+    if (points.length === 0) throw new Error("empty insights");
+    this.insightsProgress = this.t("summaryMerging");
+    this.paintInsights();
+    const overview = await this.combineOverview(points.map((point) => point.text));
+    return {
+      tldr: overview || points.slice(0, 3).map((point) => point.text).join(" "),
+      // Each part keeps the time it starts at, so the points form a clickable timeline.
+      takeaways: points.map((point) => `[${formatTimestamp(point.start)}] ${point.text}`),
+      engine: "local",
+      version: SUMMARY_VERSION,
+      chapters: [],
+      glossary: [],
+      actionItems: [],
+      followUps: [],
+    };
+  }
+  /** Writes one overview from the part summaries; long videos are condensed in groups first. */
+  private async combineOverview(texts: string[]): Promise<string> {
+    if (texts.length <= 8) {
+      return cleanSummaryText(await this.model.generate(OVERVIEW_SYSTEM, buildMergeUserPrompt(texts.join("\n")), 200));
+    }
+    const condensed: string[] = [];
+    for (let start = 0; start < texts.length; start += 8) {
+      const group = texts.slice(start, start + 8);
+      const text = cleanSummaryText(await this.model.generate(OVERVIEW_SYSTEM, buildMergeUserPrompt(group.join("\n")), 160));
+      condensed.push(text || group.join(" "));
+    }
+    return this.combineOverview(condensed);
+  }
+
+  private async copySummary(): Promise<void> {
+    const insights = this.video?.insights;
+    if (!insights) return;
+    await this.copyValue(summaryAsText(insights, this.t("takeaways")), "summaryCopied");
+  }
+
+  private applyTheme(): void {
+    document.documentElement.dataset.theme = this.theme;
+    this.nodes.themeButton.textContent = this.t(this.theme === "dark" ? "themeToLight" : "themeToDark");
   }
 
   private async runStudy(): Promise<void> {
@@ -749,7 +986,8 @@ class StudioApp {
     this.studyBusy = true;
     this.paintStudy();
     try {
-      const notes = [this.video.insights?.tldr ?? "", ...(this.video.insights?.takeaways ?? []), condenseTranscript(this.video.segments, 1800)]
+      const summary = this.video.insights ? summaryAsText(this.video.insights) : "";
+      const notes = [summary, condenseTranscript(this.video.segments, 1800)]
         .filter(Boolean)
         .join("\n");
       let parsed = parseStudyPack(await this.model.generate(STUDY_SYSTEM, buildStudyUserPrompt(notes), 640));
@@ -788,7 +1026,37 @@ class StudioApp {
     this.chatBusy = true;
     this.paintChatLog();
     try {
-      const excerpts = retrieveSegments(this.video.segments, question);
+      if (SUMMARY_INTENT.test(question)) {
+        // A summary request needs the whole video, which keyword retrieval cannot provide.
+        // Summaries saved by older versions have no titled key moments; build a fresh one.
+        if ((this.video.insights?.version ?? 0) < SUMMARY_VERSION) await this.runInsights();
+        const insights = this.video.insights;
+        this.video.chat.push({
+          id: uid("a"),
+          role: "assistant",
+          content: insights ? summaryAsText(insights, this.t("takeaways")) : this.t("insightsFailed"),
+          citations: insights ? citationsFromSummary(insights, this.video.segments) : [],
+          insufficient: !insights,
+          createdAt: Date.now(),
+        });
+        await this.persist();
+        return;
+      }
+      if (remoteEnabled(this.remote)) {
+        const transcript = condenseTranscript(this.video.segments, REMOTE_CONTEXT_CHARS);
+        const answer = (await remoteComplete(this.remote, REMOTE_CHAT_SYSTEM, buildRemoteChatUserPrompt(question, transcript), { maxTokens: 700 })).trim();
+        this.video.chat.push({
+          id: uid("a"),
+          role: "assistant",
+          content: answer,
+          citations: citationsFromText(answer, this.video.segments),
+          insufficient: false,
+          createdAt: Date.now(),
+        });
+        await this.persist();
+        return;
+      }
+      const excerpts = retrieveSegments(this.video.segments, question, 12);
       const raw = await this.model.generate(CHAT_SYSTEM, buildChatUserPrompt(question, excerpts), 360);
       const parsed = parseChatResponse(raw);
       const citations: Citation[] = parsed.insufficient
@@ -867,7 +1135,7 @@ class StudioApp {
     await this.copyValue(exportPlainTranscript(this.video.segments), "transcriptCopied");
   }
 
-  private async copyValue(value: string, key: "transcriptCopied" | "segmentCopied"): Promise<void> {
+  private async copyValue(value: string, key: "transcriptCopied" | "segmentCopied" | "summaryCopied"): Promise<void> {
     try {
       await copyText(value);
       this.toast(this.t(key), "ok");
@@ -941,6 +1209,12 @@ class StudioApp {
     this.nodes.formError.hidden = !this.formError;
     if (this.formError) this.nodes.formError.textContent = this.formError;
     this.nodes.workspace.hidden = !this.video && this.phase !== "loading";
+    const videoId = this.video?.videoId ?? null;
+    if (videoId !== this.paintedVideoId) {
+      // Recent videos stay out of the way while one is open; the user can still expand them.
+      this.paintedVideoId = videoId;
+      this.nodes.history.open = !this.video;
+    }
     this.paintHistory();
     if (!this.video && this.phase === "loading") {
       this.paintSkeleton();
@@ -1023,47 +1297,89 @@ class StudioApp {
 
   private paintInsights(): void {
     const button = this.nodes.insightsButton;
+    const body = this.nodes.insightsBody;
     button.disabled = this.insightsBusy || !this.video;
     button.textContent = this.video?.insights ? this.t("regenerate") : this.t("generateInsights");
-    clear(this.nodes.insightsBody);
+    // Once a summary exists, regenerating is a secondary action and should not compete with the text.
+    button.className = this.video?.insights ? "btn btn-ghost" : "btn btn-primary btn-lg";
+    this.nodes.insightsCopy.hidden = !this.video?.insights;
+    this.nodes.insightsCopy.disabled = this.insightsBusy || !this.video?.insights;
+    clear(body);
     if (this.insightsBusy) {
-      this.nodes.insightsBody.append(el("div", { class: "skeleton" }), el("div", { class: "skeleton" }), el("div", { class: "skeleton short" }));
+      body.append(
+        el("p", { class: "summary-status", role: "status" }, [this.insightsProgress || this.t("summaryWorking")]),
+        el("div", { class: "skeleton" }),
+        el("div", { class: "skeleton" }),
+        el("div", { class: "skeleton short" }),
+      );
       return;
     }
     const insights = this.video?.insights;
     if (!insights) {
-      this.nodes.insightsBody.append(el("p", { class: "muted" }, [this.t("insightsEmpty")]));
+      body.append(el("p", { class: "muted" }, [this.t("insightsEmpty")]));
       return;
     }
-    if (insights.tldr) this.nodes.insightsBody.append(el("section", {}, [el("h3", {}, [this.t("tldr")]), el("p", {}, [insights.tldr])]));
-    this.nodes.insightsBody.append(bulletSection(this.t("takeaways"), insights.takeaways));
-    if (insights.chapters.length) {
-      const list = el("div", { class: "inline" });
-      for (const chapter of insights.chapters) {
-        list.append(el("button", { class: "btn btn-ghost", type: "button", "data-action": "timestamp", "data-start": String(chapter.start) }, [
-          `${formatTimestamp(chapter.start)} ${chapter.title}`,
+    const article = el("article", { class: "summary" });
+    if (insights.tldr) article.append(el("p", { class: "summary-overview" }, this.renderInline(parseInline(insights.tldr))));
+    const items = summaryItems(insights);
+    if (items.length) {
+      const list = el("ul", { class: "key-points" });
+      for (const item of items) {
+        list.append(el("li", {}, [
+          item.title ? el("strong", {}, [`${item.title}: `]) : null,
+          ...this.renderInline(parseInline(item.text)),
+          item.start === null ? null : el("span", { class: "ts-group" }, [" (", this.timeLink(item.start), ")"]),
         ]));
       }
-      this.nodes.insightsBody.append(el("section", {}, [el("h3", {}, [this.t("chapters")]), list]));
+      article.append(el("section", { class: "summary-section" }, [el("h2", {}, [this.t("takeaways")]), list]));
     }
-    if (insights.glossary.length) {
-      const list = el("div");
-      for (const entry of insights.glossary) {
-        const row = el("p", { class: "term" });
-        row.append(el("strong", {}, [`${entry.term}: `]), entry.definition);
-        list.append(row);
+    if (insights.chapters.length) {
+      const list = el("ul", { class: "key-points" });
+      for (const chapter of insights.chapters) {
+        list.append(el("li", {}, [this.timeLink(chapter.start), " ", chapter.title]));
       }
-      this.nodes.insightsBody.append(el("section", {}, [el("h3", {}, [this.t("glossary")]), list]));
+      article.append(el("section", { class: "summary-section" }, [el("h2", {}, [this.t("chapters")]), list]));
     }
-    const actions = insights.actionItems.filter((item) => !/^(none|n\/a|nenhuma|nenhum|ninguna|ninguno)\b/i.test(item.trim()));
-    this.nodes.insightsBody.append(actions.length ? bulletSection(this.t("actions"), actions) : el("section", {}, [el("h3", {}, [this.t("actions")]), el("p", { class: "muted" }, [this.t("noActions")])]));
     if (insights.followUps.length) {
-      const list = el("div", { class: "inline" });
+      const list = el("div", { class: "suggestions" });
       for (const question of insights.followUps) {
-        list.append(el("button", { class: "btn btn-ghost", type: "button", "data-action": "followup", "data-question": question }, [question]));
+        list.append(el("button", { class: "chip", type: "button", "data-action": "followup", "data-question": question }, [question]));
       }
-      this.nodes.insightsBody.append(el("section", {}, [el("h3", {}, [this.t("followUps")]), list]));
+      article.append(el("section", { class: "summary-section" }, [el("h2", {}, [this.t("followUps")]), list]));
     }
+    if (insights.engine) {
+      const engine = insights.engine === "local" ? this.t("engineLocal") : insights.engine;
+      article.append(el("p", { class: "summary-meta" }, [this.t("summaryFrom", { engine })]));
+    }
+    body.append(article);
+  }
+
+  private timeLink(seconds: number, label = formatTimestamp(seconds)): HTMLButtonElement {
+    return el("button", {
+      class: "ts",
+      type: "button",
+      "data-action": "timestamp",
+      "data-start": String(seconds),
+      "aria-label": this.t("openAt", { time: label }),
+    }, [label]);
+  }
+
+  private renderInline(parts: RichInline[]): Array<Node | string> {
+    return parts.map((part) => {
+      if (part.kind === "strong") return el("strong", {}, [part.value]);
+      if (part.kind === "em") return el("em", {}, [part.value]);
+      if (part.kind === "time") return this.timeLink(part.seconds, part.label);
+      return part.value;
+    });
+  }
+
+  private renderRich(blocks: RichBlock[]): HTMLElement[] {
+    return blocks.map((block) => {
+      if ("items" in block) {
+        return el(block.kind, {}, block.items.map((item) => el("li", {}, this.renderInline(item))));
+      }
+      return el(block.kind === "h" ? "h3" : "p", {}, this.renderInline(block.inline));
+    });
   }
 
   private paintChatLog(): void {
@@ -1073,11 +1389,19 @@ class StudioApp {
       return;
     }
     for (const message of this.video.chat) {
-      const bubble = el("article", { class: message.role === "user" ? "bubble user" : "bubble" }, [
-        el("h3", {}, [message.role === "user" ? this.t("you") : this.t("assistant")]),
-        el("p", {}, [message.content]),
+      const label = el("h3", { class: "visually-hidden" }, [message.role === "user" ? this.t("you") : this.t("assistant")]);
+      if (message.role === "user") {
+        this.nodes.chatLog.append(el("article", { class: "msg user" }, [label, el("p", {}, [message.content])]));
+        continue;
+      }
+      const blocks = parseRichText(message.content);
+      const body = el("div", { class: "msg-body" }, [label, ...this.renderRich(blocks)]);
+      const bubble = el("article", { class: "msg assistant" }, [
+        el("span", { class: "msg-mark", "aria-hidden": "true" }, ["✦"]),
+        body,
       ]);
-      if (message.citations.length) {
+      // Answers that already link their moments inline do not need a second row of the same timestamps.
+      if (message.citations.length && !hasTimes(blocks)) {
         const cites = el("div", { class: "citations" }, [
           el("span", { class: "muted" }, [message.insufficient ? this.t("excerptsChecked") : this.t("sources")]),
         ]);
@@ -1093,7 +1417,7 @@ class StudioApp {
             title: citation.quote,
           }, [label]));
         }
-        bubble.append(cites);
+        body.append(cites);
       }
       this.nodes.chatLog.append(bubble);
     }
@@ -1221,8 +1545,12 @@ class StudioApp {
     if (phase === "ready") label = place ? `${this.t("modelReady")} · ${place}` : this.t("modelReady");
     if (phase === "generating") label = this.t("modelGenerating");
     if (phase === "error") label = this.t("modelError");
-    this.nodes.modelPill.textContent = label;
     this.nodes.settingsStatus.textContent = label;
+    if (remoteEnabled(this.remote)) {
+      label = `${this.t("modelApi")} · ${this.remote.model}`;
+      this.nodes.modelPill.dataset.phase = "ready";
+    }
+    this.nodes.modelPill.textContent = label;
     if (this.model.device === "webgpu") {
       this.nodes.deviceValue.textContent = this.model.gpuLabel
         ? `${this.t("deviceWebgpu")} · ${this.model.gpuLabel}`
@@ -1295,22 +1623,88 @@ interface Shell {
   videoImage: HTMLImageElement;
   insightsBody: HTMLElement;
   insightsButton: HTMLButtonElement;
+  insightsCopy: HTMLButtonElement;
+  themeButton: HTMLButtonElement;
   chatLog: HTMLElement;
   chatInput: HTMLTextAreaElement;
   studyBody: HTMLElement;
   studyButton: HTMLButtonElement;
   modelPill: HTMLElement;
+  history: HTMLDetailsElement;
   historyList: HTMLElement;
   includeChat: HTMLInputElement;
   dialog: HTMLDialogElement;
   cacheValue: HTMLElement;
   deviceValue: HTMLElement;
   fallback: HTMLElement;
+  apiUrl: HTMLInputElement;
+  apiModel: HTMLInputElement;
+  apiKey: HTMLInputElement;
+  apiStatus: HTMLElement;
   settingsStatus: HTMLElement;
   tabs: Record<TabId, HTMLButtonElement>;
   panels: Record<TabId, HTMLElement>;
   workspace: HTMLElement;
   toasts: HTMLElement;
+}
+
+/** Takeaways and chapters carry an optional leading [mm:ss] stamp. */
+function splitStamp(item: string): { start: number | null; text: string } {
+  const match = item.match(CLOCK_PREFIX);
+  if (!match) return { start: null, text: item };
+  return { start: parseClock(match[1]), text: item.slice(match[0].length) };
+}
+
+interface SummaryItem {
+  start: number | null;
+  title: string;
+  text: string;
+}
+
+/** API summaries carry titled key moments; local summaries carry timestamped sentences. */
+function summaryItems(insights: Insights): SummaryItem[] {
+  if (insights.points?.length) {
+    return insights.points.map((point) => ({ start: point.start, title: point.title, text: point.text }));
+  }
+  return insights.takeaways.map((item) => {
+    const { start, text } = splitStamp(item);
+    return { start, title: "", text };
+  });
+}
+
+function summaryAsText(insights: Insights, heading = ""): string {
+  const lines = insights.tldr ? [insights.tldr, ""] : [];
+  const items = summaryItems(insights);
+  if (heading && items.length) lines.push(`**${heading}**`);
+  for (const item of items) {
+    const title = item.title ? `**${item.title}:** ` : "";
+    const stamp = item.start === null ? "" : ` (${formatTimestamp(item.start)})`;
+    lines.push(`- ${title}${item.text}${stamp}`);
+  }
+  return lines.join("\n").trim();
+}
+
+function citationsFromSummary(insights: Insights, segments: TranscriptSegment[]): Citation[] {
+  const citations: Citation[] = [];
+  for (const item of summaryItems(insights)) {
+    if (item.start === null) continue;
+    citations.push({ start: item.start, end: item.start + 5, quote: item.text.slice(0, 140), segmentId: nearestSegment(segments, item.start)?.id });
+  }
+  return citations.slice(0, 8);
+}
+
+/** Citations for an API answer: each [mm:ss] it wrote, matched to the nearest transcript line. */
+function citationsFromText(text: string, segments: TranscriptSegment[]): Citation[] {
+  const seen = new Set<number>();
+  const citations: Citation[] = [];
+  for (const start of timestampsIn(text)) {
+    if (seen.has(start)) continue;
+    seen.add(start);
+    const segment = nearestSegment(segments, start);
+    if (!segment) continue;
+    citations.push({ start, end: start + 5, quote: segment.text.slice(0, 140), segmentId: segment.id });
+  }
+  return citations.slice(0, 8);
 }
 
 function feature(title: MessageKey, body: MessageKey): HTMLElement {
@@ -1328,11 +1722,6 @@ function tabKey(id: TabId): MessageKey {
   return "tabExport";
 }
 
-function bulletSection(title: string, items: string[]): HTMLElement {
-  const list = el("ul");
-  for (const item of items) list.append(el("li", {}, [item]));
-  return el("section", {}, [el("h3", {}, [title]), items.length ? list : el("p", { class: "muted" }, ["—"])]);
-}
 
 function toRecord(fetched: FetchedTranscript): VideoRecord {
   return {
@@ -1355,6 +1744,10 @@ function messageKey(error: unknown): MessageKey {
       return "corsBlocked";
     case "extension-permission":
       return "extensionPermission";
+    case "remote-unreachable":
+      return "apiUnreachable";
+    case "remote-api":
+      return "apiFailed";
     case "model-download":
       return "modelDownloadFailed";
     case "cache":

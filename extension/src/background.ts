@@ -31,8 +31,35 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     respondWithTranscript(message, sendResponse);
     return true;
   }
+  if (
+    message?.type === "captions-from-tab" &&
+    sender.id === chrome.runtime.id &&
+    typeof message.tabId === "number" &&
+    typeof message.videoId === "string"
+  ) {
+    const languages = Array.isArray(message.languages) ? message.languages.filter((item: unknown) => typeof item === "string") : ["en"];
+    void readCaptionsInTab(message.tabId, message.videoId, languages)
+      .then((result) => sendResponse(result))
+      .catch((error: unknown) => sendResponse({ ok: false, code: "network", detail: error instanceof Error ? error.message : String(error) }));
+    return true;
+  }
   return undefined;
 });
+
+/** Reads captions from the top document of a YouTube watch tab: the real page the user is watching. */
+async function readCaptionsInTab(tabId: number, videoId: string, languages: string[]): Promise<CaptionXmlResult> {
+  const tab = await chrome.tabs.get(tabId);
+  if (!tab.url?.startsWith("https://www.youtube.com/watch")) {
+    return { ok: false, code: "no-captions", detail: "not a watch page" };
+  }
+  const injected = await chrome.scripting.executeScript({
+    target: { tabId },
+    world: "MAIN",
+    func: readCaptionXml,
+    args: [videoId, languages],
+  });
+  return injected[0]?.result ?? { ok: false, code: "network", detail: "no result from tab" };
+}
 
 chrome.runtime.onMessageExternal.addListener((message, _sender, sendResponse) => {
   if (message?.type === "ping") {

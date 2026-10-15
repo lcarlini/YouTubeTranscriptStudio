@@ -53,6 +53,15 @@ export function buildProcessingChunks(
   }));
 }
 
+/** Splits the whole transcript into consecutive parts, so every line of the video is read. */
+export function transcriptParts(segments: TranscriptSegment[], chunkChars = 4500): TranscriptChunk[] {
+  return groupSegments(segments, chunkChars).map((group, index) => ({
+    index,
+    segments: group,
+    text: group.map((segment) => `[${formatTimestamp(segment.start)}] ${segment.text}`).join("\n"),
+  }));
+}
+
 export function condenseTranscript(segments: TranscriptSegment[], maxChars: number): string {
   const lines = segments.map((segment) => `[${formatTimestamp(segment.start)}] ${segment.text.replace(/\s+/g, " ").trim()}`);
   const full = lines.join("\n");
