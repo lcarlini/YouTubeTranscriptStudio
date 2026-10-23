@@ -15,38 +15,42 @@ Every claim needs a timestamp that appears in the excerpts. Never invent timesta
 // so each step asks for plain prose and the app keeps the structure (timestamps, order).
 export const PART_SYSTEM = `You summarize part of a YouTube video from its transcript.
 Write two or three plain sentences in the same language as the transcript.
-Say what the speaker covers and what they conclude. Use only facts from the transcript.
-Output only the summary, with no title or label.`;
+Cover the topic, the speaker's claim or advice, and what they conclude. Do not only name the subject.
+Use only facts from the transcript. Output only the summary, with no title or label.`;
 
 export const OVERVIEW_SYSTEM = `You write the overview of a YouTube video from summaries of its parts, in order.
 Write three to five plain sentences in the same language as the summaries.
-Use only facts from the summaries. Output only the overview, with no title or label.`;
+State the main argument and the overall conclusion. Use only facts from the summaries.
+Output only the overview, with no title or label.`;
 
-// The API model reads the whole transcript at once, so it can write a YouTube-style summary:
-// an overview plus timestamped key moments, returned as JSON the app can check.
-export const REMOTE_SUMMARY_SYSTEM = `You summarize a YouTube video from its transcript, the way YouTube's own AI summary does.
+// Matches YouTube's "Ask about this video" panel: a few thematic blocks, each a short
+// paragraph with several inline timestamps and a clear takeaway — not a list of one-liners.
+export const REMOTE_SUMMARY_SYSTEM = `You write a video summary in the same style as YouTube's built-in AI summary ("Ask about this video" / Gemini).
 Write in the language of the transcript. If the transcript is Portuguese, write Brazilian Portuguese.
 Return only a JSON object with this shape:
-{"overview": "<three or four sentences: what the video is about, its main argument, and its conclusion. Wrap the two or three most important phrases in **double asterisks**>",
- "points": [{"time": "<the [timestamp] where this topic starts, copied exactly from the transcript>", "title": "<two to five words>", "text": "<one sentence of at most 25 words>"}]}
-Give 6 to 10 points, in the order they appear in the video. Every point is an object with time, title and text, for example:
-{"time": "03:09", "title": "Visual style", "text": "The art mixes gothic shapes with bold, saturated colors."}
-Write each text in your own words; never copy transcript sentences. Skip greetings, sponsors and channel promotion.
+{"overview": "<one or two sentences naming the video's theme and overall takeaway. Wrap the most important phrase in **double asterisks**>",
+ "points": [{"time": "<start timestamp of this theme, copied from the transcript>", "title": "<short theme title, about 3 to 8 words>", "text": "<one dense paragraph: 3 to 5 sentences>"}]}
+Give exactly 3 to 5 points — one per major theme of the video, not many tiny bullets. Merge related moments into the same point.
+Each point's text must:
+1) State concrete facts, names, numbers, and products from the transcript.
+2) Place a timestamp in parentheses after each distinct claim, using ranges when a claim spans a stretch, for example (0:09-0:32) or (1:26-2:15). Copy times from the transcript.
+3) End with the speaker's conclusion, opinion, or advice when they give one (do not stop at "the presenter talks about X").
+Good example:
+{"time": "0:09", "title": "Desbloqueio do Nintendo Switch 2", "text": "O apresentador comenta que, após pouco mais de um ano do lançamento, o console foi desbloqueado pelo desenvolvedor Pepsi Pool (0:09-0:32). A ferramenta permite homebrews e modificações nos jogos (0:32-0:56). Ele reflete que a melhor forma de combater a pirataria é oferecer serviços de qualidade, citando a filosofia do Gabe Newell (1:26-2:15)."}
+Bad example (too thin — never do this):
+{"time": "0:06", "title": "Switch 2 desbloqueado", "text": "O Nintendo Switch 2 está sendo desbloqueado e a pirataria se torna realidade."}
+Write in your own words; never copy transcript sentences. Skip greetings, sponsors and channel promotion.
 Use only facts from the transcript. Never invent details, names, or numbers.`;
 
-export const REMOTE_PART_SYSTEM = `You list the key moments of one part of a YouTube video from its transcript.
+export const REMOTE_PART_SYSTEM = `You list thematic sections of one part of a YouTube video, in YouTube AI-summary style.
 Write in the language of the transcript. Return only a JSON object with this shape:
-{"points": [{"time": "<the [timestamp] where this topic starts, copied exactly from the transcript>", "title": "<two to five words>", "text": "<one sentence of at most 25 words>"}]}
-Give 2 to 4 points in the order they appear, for example:
-{"time": "03:09", "title": "Visual style", "text": "The art mixes gothic shapes with bold, saturated colors."}
-Write each text in your own words; never copy transcript sentences. Skip greetings, sponsors and channel promotion.
-Use only facts from the transcript.`;
+{"points": [{"time": "<start timestamp>", "title": "<3 to 8 words>", "text": "<3 to 5 sentences with (mm:ss) or (mm:ss-mm:ss) after each claim, ending with the speaker's conclusion>"}]}
+Give 1 to 3 points. Merge related moments. Never write a one-sentence topic label.`;
 
 export const REMOTE_OVERVIEW_SYSTEM = `You write the overview of a YouTube video from its ordered key moments.
-Write three or four sentences describing what the video is about, its main argument, and its conclusion.
-Wrap the two or three most important phrases in **double asterisks**.
+Write one or two sentences with the theme and overall takeaway.
+Wrap the most important phrase in **double asterisks**.
 Use only facts from the notes. Output only the overview, with no title or label.`;
-
 export const REMOTE_CHAT_SYSTEM = `You answer questions about one YouTube video using its transcript.
 Answer in the language of the question. Start with a short paragraph that answers directly.
 When a list helps, add "- " bullets, each starting with a **short bold title:** followed by one sentence.

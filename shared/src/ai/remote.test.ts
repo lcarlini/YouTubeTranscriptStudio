@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isStudioError } from "../errors";
-import { isModelListed, normalizeBaseUrl, remoteComplete, remoteEnabled } from "./remote";
+import { isModelListed, normalizeBaseUrl, remoteComplete, remoteEnabled, remoteWarm } from "./remote";
 import { parseRemoteSummary, timestampsIn } from "./parse-model";
 
 afterEach(() => {
@@ -97,6 +97,19 @@ describe("timestampsIn", () => {
 
 describe("remoteComplete", () => {
   const settings = { baseUrl: "http://localhost:11434", apiKey: "", model: "yts-llama3.1-8b" };
+
+  it("warms the model with a tiny completion when an API is configured", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await remoteWarm(settings);
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const body = JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body)) as {
+      max_tokens: number;
+    };
+    expect(body.max_tokens).toBe(4);
+  });
 
   it("sends the transcript to the chat endpoint and returns the answer text", async () => {
     const fetchMock = vi.fn(async () =>

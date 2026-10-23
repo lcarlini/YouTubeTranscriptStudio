@@ -206,8 +206,11 @@ h1 { font-size: clamp(2rem, 5vw, 3.4rem); margin: 10px 0 12px; max-width: 18ch; 
 .summary-section { margin-top: 8px; }
 .summary-section h2 { font-size: 1.15rem; margin: 0 0 10px; }
 .key-points { margin: 0; padding-left: 1.3em; display: grid; gap: 12px; }
+.key-points-topics { gap: 16px; padding-left: 1.5em; }
 .key-points li { padding-left: 4px; }
+.key-points-topics li { line-height: 1.45; }
 .key-points li::marker { color: var(--muted); }
+.key-points-topics li::marker { color: var(--text); font-weight: 600; }
 .summary-meta { margin: 28px 0 0; font-size: 0.85rem; color: var(--muted); }
 .summary-status { color: var(--muted); font-size: 1.1rem; margin: 0 0 12px; }
 

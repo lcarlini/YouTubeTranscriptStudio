@@ -82,6 +82,15 @@ export interface RemoteCompletionOptions {
   json?: boolean;
 }
 
+/**
+ * Loads the configured model into memory (Ollama VRAM) with a tiny reply so the
+ * first real summary does not pay the cold-start cost.
+ */
+export async function remoteWarm(settings: RemoteSettings): Promise<void> {
+  if (!remoteEnabled(settings)) return;
+  await remoteComplete(settings, "Reply with the single word OK.", "OK", { maxTokens: 4 });
+}
+
 export async function remoteComplete(
   settings: RemoteSettings,
   system: string,

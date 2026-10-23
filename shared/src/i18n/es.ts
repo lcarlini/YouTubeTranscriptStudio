@@ -71,6 +71,7 @@ export const es: Messages = {
   insightsEmpty: "El resumen aparece aquí cuando el modelo local lee todo el video.",
   summaryWorking: "Leyendo todo el video…",
   summaryReading: "Leyendo la parte {current} de {total}…",
+  summaryReadingParallel: "Leyendo las partes en paralelo… {done}/{total} listas",
   summaryMerging: "Escribiendo el resumen final…",
   copySummary: "Copiar resumen",
   summaryCopied: "Resumen copiado.",

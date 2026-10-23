@@ -69,6 +69,7 @@ export const en = {
   insightsEmpty: "The summary appears here once the local model reads the whole video.",
   summaryWorking: "Reading the whole video…",
   summaryReading: "Reading part {current} of {total}…",
+  summaryReadingParallel: "Reading parts in parallel… {done}/{total} done",
   summaryMerging: "Writing the final summary…",
   copySummary: "Copy summary",
   summaryCopied: "Summary copied.",

@@ -71,6 +71,7 @@ export const ptBR: Messages = {
   insightsEmpty: "O resumo aparece aqui quando o modelo local lê o vídeo inteiro.",
   summaryWorking: "Lendo o vídeo inteiro…",
   summaryReading: "Lendo a parte {current} de {total}…",
+  summaryReadingParallel: "Lendo as partes em paralelo… {done}/{total} prontas",
   summaryMerging: "Escrevendo o resumo final…",
   copySummary: "Copiar resumo",
   summaryCopied: "Resumo copiado.",

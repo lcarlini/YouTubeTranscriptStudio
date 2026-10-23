@@ -3,15 +3,12 @@ import {
   OVERVIEW_SYSTEM,
   PART_SYSTEM,
   REMOTE_CHAT_SYSTEM,
-  REMOTE_OVERVIEW_SYSTEM,
-  REMOTE_PART_SYSTEM,
   REMOTE_SUMMARY_SYSTEM,
   STUDY_SYSTEM,
   buildChatUserPrompt,
   buildInsightsUserPrompt,
   buildMergeUserPrompt,
   buildRemoteChatUserPrompt,
-  buildRemoteOverviewUserPrompt,
   buildRemoteSummaryUserPrompt,
   languageName,
   buildStudyUserPrompt,
@@ -23,6 +20,7 @@ import {
   remoteComplete,
   remoteEnabled,
   remoteModels,
+  remoteWarm,
   normalizeBaseUrl,
   type RemoteSettings,
 } from "../ai/remote";
@@ -78,9 +76,13 @@ const SUMMARY_INTENT = /\b(resum\w*|summar\w*|resumen\w*|tl;?dr|overview)\b/i;
 /** Transcript text per API request. Portuguese with timestamps is about 2.9 characters per token, so this is about 5k tokens and leaves room for the 8k-token context. */
 /** Chat sees this much transcript; answers are short, so the longer context costs little. */
 const REMOTE_CONTEXT_CHARS = 14000;
-/** Summaries read the video in smaller parts: a local GPU writes much faster with about 2k tokens of context. */
-const REMOTE_PART_CHARS = 6000;
-const SUMMARY_VERSION = 2;
+/**
+ * One API request holds this much transcript. ~8k-token models (Llama 3.1 8B) keep
+ * room for the JSON answer; longer videos are evenly condensed instead of split into
+ * N sequential/parallel calls (one GPU still runs those one-by-one and feels slower).
+ */
+const REMOTE_SUMMARY_CHARS = 14000;
+const SUMMARY_VERSION = 5;
 const CLOCK_PREFIX = /^\[((?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?)\]\s*/;
 const REPO = "https://github.com/lcarlini/YouTubeTranscriptStudio";
 const PAGES = "https://lcarlini.github.io/YouTubeTranscriptStudio/";
@@ -132,6 +134,8 @@ class StudioApp {
   private remote: RemoteSettings = readStoredRemote();
   private paintedVideoId: string | null | undefined = undefined;
   private readonly nodes: Shell;
+  /** Cold-start warm of Ollama or the in-browser model; shared so summary waits for it. */
+  private warmPromise: Promise<void> | null = null;
 
   constructor(
     private readonly root: HTMLElement,
@@ -147,6 +151,8 @@ class StudioApp {
     this.paintModel();
     this.bind();
     void this.refreshHistory();
+    // Warm the model while the side panel paints and the current-tab transcript loads.
+    void this.ensureWarm();
     if (host.mode === "extension") void this.preloadExtensionVideo();
   }
 
@@ -712,7 +718,9 @@ class StudioApp {
     }
     try {
       const languages = preferredCaptionLanguages(this.locale);
-      // Each strategy may fail on its own; a failure must not stop the next one.
+      // Prefer the watch-tab captions first (fast). Only open the embed popup if that fails.
+      // History refresh runs in parallel with the caption fetch so the shell feels ready sooner.
+      const historyReady = this.refreshHistory();
       let fetched: FetchedTranscript | null = null;
       for (const [name, strategy] of [
         ["caption-frame", this.host.tryCaptionFrame],
@@ -738,10 +746,10 @@ class StudioApp {
       this.highlightedId = null;
       this.search = "";
       this.nodes.search.value = "";
-      await this.persist();
+      await Promise.all([this.persist(), historyReady]);
       await this.refreshHistory();
       this.toast(this.t("savedInBrowser"), "ok");
-      // The summary is the first thing the user reads, so it starts as soon as the transcript is ready.
+      // Summary starts as soon as the transcript is ready; ensureWarm overlaps with the fetch above.
       if (!this.video.insights) void this.runInsights();
     } catch (error) {
       this.phase = this.video ? "ready" : "error";
@@ -899,36 +907,37 @@ class StudioApp {
     }
   }
 
-  /** The API model reads the whole transcript in one request; very long videos go in a few parts. */
+  /** One request: full or evenly condensed transcript → overview + key moments. */
   private async summarizeWithApi(video: VideoRecord): Promise<Insights> {
     const engine = this.remote.model;
     // Points without a time are placed at the transcript line that best matches them.
     const locate = (text: string): number | null => retrieveSegments(video.segments, text, 1)[0]?.start ?? null;
     const language = languageName(video.captionLanguage);
-    const parts = transcriptParts(video.segments, REMOTE_PART_CHARS);
-    const points: KeyPoint[] = [];
-    let overview = "";
-    if (parts.length === 1) {
-      this.insightsProgress = this.t("summaryRemote", { model: engine });
-      this.paintInsights();
-      const raw = await remoteComplete(this.remote, REMOTE_SUMMARY_SYSTEM, buildRemoteSummaryUserPrompt(parts[0].text, language), { maxTokens: 1200, json: true });
-      const parsed = parseRemoteSummary(raw, locate);
-      overview = parsed.overview;
-      points.push(...parsed.points);
-    } else {
-      for (const [index, part] of parts.entries()) {
-        this.insightsProgress = this.t("summaryReading", { current: index + 1, total: parts.length });
-        this.paintInsights();
-        const raw = await remoteComplete(this.remote, REMOTE_PART_SYSTEM, buildRemoteSummaryUserPrompt(part.text, language), { maxTokens: 400, json: true });
-        points.push(...parseRemoteSummary(raw, locate).points);
-      }
-      this.insightsProgress = this.t("summaryMerging");
-      this.paintInsights();
-      const notes = points.map((point) => `[${formatTimestamp(point.start)}] ${point.title}: ${point.text}`).join("\n");
-      overview = cleanSummaryText(await remoteComplete(this.remote, REMOTE_OVERVIEW_SYSTEM, buildRemoteOverviewUserPrompt(notes, language), { maxTokens: 400 }));
+    const transcript = condenseTranscript(video.segments, REMOTE_SUMMARY_CHARS);
+    this.insightsProgress = this.t("summaryRemote", { model: engine });
+    this.paintInsights();
+    await this.ensureWarm();
+    const raw = await remoteComplete(
+      this.remote,
+      REMOTE_SUMMARY_SYSTEM,
+      buildRemoteSummaryUserPrompt(transcript, language),
+      { maxTokens: 1600, json: true },
+    );
+    const parsed = parseRemoteSummary(raw, locate);
+    if (parsed.points.length === 0 && !parsed.overview) {
+      throw new StudioError("remote-api", "The API returned no summary.");
     }
-    if (points.length === 0 && !overview) throw new StudioError("remote-api", "The API returned no summary.");
-    return { tldr: overview, takeaways: [], points, engine, version: SUMMARY_VERSION, chapters: [], glossary: [], actionItems: [], followUps: [] };
+    return {
+      tldr: parsed.overview,
+      takeaways: [],
+      points: parsed.points,
+      engine,
+      version: SUMMARY_VERSION,
+      chapters: [],
+      glossary: [],
+      actionItems: [],
+      followUps: [],
+    };
   }
 
   private async summarizeLocally(video: VideoRecord): Promise<Insights> {
@@ -1087,9 +1096,25 @@ class StudioApp {
     }
   }
 
+  private ensureWarm(): Promise<void> {
+    this.warmPromise ??= this.warmInference().catch((error) => {
+      // Allow a later retry if Ollama was still starting.
+      this.warmPromise = null;
+      throw error;
+    });
+    return this.warmPromise.catch(() => undefined);
+  }
+
+  private async warmInference(): Promise<void> {
+    if (remoteEnabled(this.remote)) await remoteWarm(this.remote);
+    else await this.model.ensureLoaded();
+  }
+
   private async warmModel(): Promise<void> {
     try {
-      await this.model.ensureLoaded();
+      this.warmPromise = null;
+      await this.warmInference();
+      this.warmPromise = Promise.resolve();
     } catch (error) {
       this.toast(this.t(messageKey(error)), "err");
       this.paintModel();
@@ -1323,12 +1348,18 @@ class StudioApp {
     if (insights.tldr) article.append(el("p", { class: "summary-overview" }, this.renderInline(parseInline(insights.tldr))));
     const items = summaryItems(insights);
     if (items.length) {
-      const list = el("ul", { class: "key-points" });
+      // Numbered thematic blocks match YouTube's summary panel; times live inside the prose.
+      const list = el("ol", { class: "key-points key-points-topics" });
       for (const item of items) {
+        const inline = parseInline(item.text);
+        const trailing =
+          item.start === null || hasTimes([{ kind: "p", inline }])
+            ? null
+            : el("span", { class: "ts-group" }, [" (", this.timeLink(item.start), ")"]);
         list.append(el("li", {}, [
           item.title ? el("strong", {}, [`${item.title}: `]) : null,
-          ...this.renderInline(parseInline(item.text)),
-          item.start === null ? null : el("span", { class: "ts-group" }, [" (", this.timeLink(item.start), ")"]),
+          ...this.renderInline(inline),
+          trailing,
         ]));
       }
       article.append(el("section", { class: "summary-section" }, [el("h2", {}, [this.t("takeaways")]), list]));
