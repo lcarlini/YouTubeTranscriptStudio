@@ -1,10 +1,14 @@
-import type { Locale, TabId, Theme } from "../types";
+import type { Accent, Appearance, Contrast, Density, Locale, Motion, TabId, Theme } from "../types";
 import type { RemoteProvider } from "../ai/remote";
 
 export const PREF_LANGUAGE = "yts.language";
 export const PREF_TAB = "yts.tab";
 export const PREF_INCLUDE_CHAT = "yts.includeChat";
 export const PREF_THEME = "yts.theme";
+export const PREF_ACCENT = "yts.accent";
+export const PREF_DENSITY = "yts.density";
+export const PREF_CONTRAST = "yts.contrast";
+export const PREF_MOTION = "yts.motion";
 export const PREF_PROFILES = "yts.profiles";
 export const PREF_ACTIVE_PROFILE = "yts.profile.active";
 /** Legacy single-API keys, read only to migrate them into a profile. */
@@ -54,10 +58,55 @@ export function initialTab(): TabId {
   return readStoredTab(localGet(PREF_TAB)) ?? "insights";
 }
 
-/** Dark is the default; light is only used when the user picked it. */
-export function initialTheme(): Theme {
-  return localGet(PREF_THEME) === "light" ? "light" : "dark";
+const THEMES: Theme[] = ["blue", "white", "black"];
+const ACCENTS: Accent[] = ["blue", "teal", "violet", "amber", "rose"];
+const DENSITIES: Density[] = ["comfortable", "compact"];
+const CONTRASTS: Contrast[] = ["standard", "more"];
+const MOTIONS: Motion[] = ["on", "off"];
+
+/** Blue (dark) is the default. Values saved by version 1.0 ("dark" / "light") still work. */
+export function readStoredTheme(value: string | null | undefined): Theme {
+  if (value === "light") return "white";
+  if (value === "dark") return "blue";
+  return THEMES.find((theme) => theme === value) ?? "blue";
 }
+
+export function initialTheme(): Theme {
+  return readStoredTheme(localGet(PREF_THEME));
+}
+
+/** Reads a stored choice, falling back to the default when the value is unknown. */
+function pick<T extends string>(options: readonly T[], value: string | null, fallback: T): T {
+  return options.find((option) => option === value) ?? fallback;
+}
+
+export function initialAppearance(): Appearance {
+  return {
+    theme: initialTheme(),
+    accent: pick(ACCENTS, localGet(PREF_ACCENT), "blue"),
+    density: pick(DENSITIES, localGet(PREF_DENSITY), "comfortable"),
+    contrast: pick(CONTRASTS, localGet(PREF_CONTRAST), "standard"),
+    motion: pick(MOTIONS, localGet(PREF_MOTION), "on"),
+  };
+}
+
+/** Storage key for each appearance setting. */
+export const APPEARANCE_KEYS = {
+  theme: PREF_THEME,
+  accent: PREF_ACCENT,
+  density: PREF_DENSITY,
+  contrast: PREF_CONTRAST,
+  motion: PREF_MOTION,
+} as const;
+
+/** Accepted values, so the UI and the stored choices stay in one list. */
+export const APPEARANCE_OPTIONS = {
+  theme: THEMES,
+  accent: ACCENTS,
+  density: DENSITIES,
+  contrast: CONTRASTS,
+  motion: MOTIONS,
+} as const;
 
 export interface AiProfile {
   id: string;

@@ -51,15 +51,16 @@ import type { MessageKey } from "../i18n";
 import { translate } from "../i18n";
 import { clearVideos, deleteVideo, getVideo, listVideos, saveVideo } from "../storage/history";
 import {
+  APPEARANCE_KEYS,
+  APPEARANCE_OPTIONS,
   BROWSER_PROFILE,
   PREF_INCLUDE_CHAT,
   PREF_LANGUAGE,
   PREF_TAB,
-  PREF_THEME,
   type AiProfile,
+  initialAppearance,
   initialLocale,
   initialTab,
-  initialTheme,
   localGet,
   localSet,
   newProfileId,
@@ -71,7 +72,7 @@ import {
 import { findMatches, groupMatchesBySegment } from "../transcript/search";
 import { parsePlainTranscript } from "../transcript/parse";
 import { formatTimestamp, parseClock } from "../transcript/time";
-import type { ChatMessage, Citation, Insights, TabId, Theme, TranscriptSegment, VideoRecord } from "../types";
+import type { Appearance, ChatMessage, Citation, Insights, TabId, TranscriptSegment, VideoRecord } from "../types";
 import { fetchYouTubeTranscript, preferredCaptionLanguages } from "../youtube/fetch-transcript";
 import type { FetchedTranscript } from "../youtube/fetch-transcript";
 import { canonicalWatchUrl, parseYouTubeVideoId, thumbnailUrl } from "../youtube/url";
@@ -144,7 +145,7 @@ export function mountStudio(root: HTMLElement, host: StudioHost): void {
 class StudioApp {
   private locale = initialLocale();
   private tab = initialTab();
-  private theme: Theme = initialTheme();
+  private appearance: Appearance = initialAppearance();
   private insightsProgress = "";
   private urlInput = "";
   private phase: "idle" | "loading" | "ready" | "error" = "idle";
@@ -192,6 +193,7 @@ class StudioApp {
     this.model = new LocalModelClient(() => this.paintModel(), host.wasmPaths);
     this.applyI18n();
     this.applyTheme();
+    this.paintAppearanceControls();
     this.setTab(this.tab);
     this.paintModel();
     this.paintProfileControls();
@@ -375,6 +377,41 @@ class StudioApp {
         el("p", {}, [el("span", { "data-i18n": "statusLabel" }), " ", el("strong", { class: "settings-status" })]),
         el("p", {}, [el("span", { "data-i18n": "modelDevice" }), " ", deviceValue]),
         fallback,
+        el("h3", { "data-i18n": "appearanceTitle" }),
+        el("p", { class: "muted", "data-i18n": "appearanceIntro" }),
+        choiceGroup("theme", "themeLabel", [
+          ["blue", "themeBlue"],
+          ["white", "themeWhite"],
+          ["black", "themeBlack"],
+        ]),
+        el("div", { class: "appearance-group" }, [
+          el("p", { class: "group-label", "data-i18n": "accentLabel" }),
+          el("div", { class: "swatches", role: "group" }, (["blue", "teal", "violet", "amber", "rose"] as const).map((value) =>
+            el("button", {
+              type: "button",
+              class: `swatch swatch-${value}`,
+              "data-action": "appearance",
+              "data-key": "accent",
+              "data-value": value,
+              "aria-pressed": "false",
+              "data-i18n-label": `accent${value[0].toUpperCase()}${value.slice(1)}` as MessageKey,
+            }),
+          )),
+        ]),
+        el("div", { class: "appearance-row" }, [
+          choiceGroup("density", "densityLabel", [
+            ["comfortable", "densityComfortable"],
+            ["compact", "densityCompact"],
+          ]),
+          choiceGroup("contrast", "contrastLabel", [
+            ["standard", "contrastStandard"],
+            ["more", "contrastMore"],
+          ]),
+          choiceGroup("motion", "motionLabel", [
+            ["on", "motionOn"],
+            ["off", "motionOff"],
+          ]),
+        ]),
         el("h3", { "data-i18n": "apiTitle" }),
         el("p", { class: "muted", "data-i18n": "apiIntro" }),
         el("label", { class: "field" }, [el("span", { "data-i18n": "profileLabel" }), profileSelect]),
@@ -418,16 +455,19 @@ class StudioApp {
       ]),
       el("main", { id: "content" }, [
         el("section", { class: "hero" }, [
-          el("p", { class: "eyebrow", "data-i18n": "heroEyebrow" }),
-          el("h1", { "data-i18n": "heroTitle" }),
-          el("p", { class: "lede", "data-i18n": "heroBody" }),
-          el("button", { class: "btn btn-primary", type: "button", "data-action": "jump-url", "data-i18n": "heroCta" }),
+          el("div", { class: "hero-copy" }, [
+            el("p", { class: "eyebrow", "data-i18n": "heroEyebrow" }),
+            el("h1", { "data-i18n": "heroTitle" }),
+            el("p", { class: "lede", "data-i18n": "heroBody" }),
+            el("button", { class: "btn btn-primary btn-lg", type: "button", "data-action": "jump-url", "data-i18n": "heroCta" }),
+          ]),
+          heroPreview(),
         ]),
         el("section", { class: "feature-grid" }, [
-          feature("featureTranscript", "featureTranscriptBody"),
-          feature("featureExport", "featureExportBody"),
-          feature("featureAi", "featureAiBody"),
-          feature("featureExtension", "featureExtensionBody"),
+          feature("featureTranscript", "featureTranscriptBody", "≡"),
+          feature("featureExport", "featureExportBody", "⇩"),
+          feature("featureAi", "featureAiBody", "✦"),
+          feature("featureExtension", "featureExtensionBody", "▣"),
         ]),
         el("section", { class: "studio", id: "studio" }, [
           el("form", { class: "url-row" }, [
@@ -574,9 +614,10 @@ class StudioApp {
     } else if (action === "next-match") {
       this.moveMatch(1);
     } else if (action === "theme") {
-      this.theme = this.theme === "dark" ? "light" : "dark";
-      localSet(PREF_THEME, this.theme);
-      this.applyTheme();
+      // The topbar button flips between blue and white; black is picked in Settings.
+      this.setAppearance("theme", this.appearance.theme === "white" ? "blue" : "white");
+    } else if (action === "appearance" && target.dataset.key && target.dataset.value) {
+      this.setAppearance(target.dataset.key as keyof Appearance, target.dataset.value);
     } else if (action === "copy-summary") {
       await this.copySummary();
     } else if (action === "insights") {
@@ -1188,9 +1229,35 @@ class StudioApp {
     await this.copyValue(summaryAsText(insights, this.t("takeaways")), "summaryCopied");
   }
 
+  /** Saves one appearance choice and applies it. Unknown values are ignored. */
+  private setAppearance(key: keyof Appearance, value: string): void {
+    const options = APPEARANCE_OPTIONS[key] as readonly string[];
+    if (!options.includes(value)) return;
+    this.appearance = { ...this.appearance, [key]: value } as Appearance;
+    localSet(APPEARANCE_KEYS[key], value);
+    this.applyTheme();
+    this.paintAppearanceControls();
+  }
+
+  /** Sets the data attributes that the stylesheet reads, and the topbar button label. */
   private applyTheme(): void {
-    document.documentElement.dataset.theme = this.theme;
-    this.nodes.themeButton.textContent = this.t(this.theme === "dark" ? "themeToLight" : "themeToDark");
+    const root = document.documentElement;
+    const { theme, accent, density, contrast, motion } = this.appearance;
+    root.dataset.theme = theme;
+    root.dataset.accent = accent;
+    root.dataset.density = density;
+    root.dataset.contrast = contrast;
+    root.dataset.motion = motion;
+    this.nodes.themeButton.textContent = this.t(theme === "white" ? "themeToDark" : "themeToLight");
+  }
+
+  /** Marks the selected option in each Appearance group (for screen readers and styling). */
+  private paintAppearanceControls(): void {
+    for (const button of this.root.querySelectorAll<HTMLButtonElement>("[data-action='appearance']")) {
+      const key = button.dataset.key as keyof Appearance | undefined;
+      const selected = key !== undefined && this.appearance[key] === button.dataset.value;
+      button.setAttribute("aria-pressed", String(selected));
+    }
   }
 
   private async runStudy(): Promise<void> {
@@ -1463,6 +1530,8 @@ class StudioApp {
     this.nodes.videoMeta.textContent = [this.video.author, this.t("captionLanguage", { language: this.video.captionLanguage })]
       .filter(Boolean)
       .join(" · ");
+    // Pasted captions have no thumbnail: hide the image rather than show a broken one.
+    this.nodes.videoImage.hidden = !this.video.thumbnailUrl;
     this.nodes.videoImage.src = this.video.thumbnailUrl;
     this.nodes.videoImage.alt = this.video.title;
     if (this.video.url) {
@@ -1558,7 +1627,11 @@ class StudioApp {
     }
     const insights = this.video?.insights;
     if (!insights) {
-      body.append(el("p", { class: "muted" }, [this.t("insightsEmpty")]));
+      // Name the engine that will write the summary: the API model, or the in-browser one.
+      const empty = remoteEnabled(this.remote)
+        ? this.t("insightsEmptyApi", { model: this.remote.model })
+        : this.t("insightsEmpty");
+      body.append(el("p", { class: "muted" }, [empty]));
       return;
     }
     const article = el("article", { class: "summary" });
@@ -1963,10 +2036,49 @@ function citationsFromText(text: string, segments: TranscriptSegment[]): Citatio
   return citations.slice(0, 8);
 }
 
-function feature(title: MessageKey, body: MessageKey): HTMLElement {
+function feature(title: MessageKey, body: MessageKey, icon: string): HTMLElement {
   return el("article", { class: "feature" }, [
+    el("span", { class: "feature-icon", "aria-hidden": "true" }, [icon]),
     el("h2", { "data-i18n": title }),
     el("p", { "data-i18n": body }),
+  ]);
+}
+
+/** One row of segmented buttons for an appearance setting. */
+function choiceGroup(key: keyof Appearance, label: MessageKey, options: Array<[string, MessageKey]>): HTMLElement {
+  return el("div", { class: "appearance-group" }, [
+    el("p", { class: "group-label", "data-i18n": label }),
+    el("div", { class: "segmented", role: "group" }, options.map(([value, text]) =>
+      el("button", {
+        type: "button",
+        class: "segment-option",
+        "data-action": "appearance",
+        "data-key": key,
+        "data-value": value,
+        "aria-pressed": "false",
+        "data-i18n": text,
+      }),
+    )),
+  ]);
+}
+
+/** A decorative transcript sample for the landing page: shows what the studio produces. */
+function heroPreview(): HTMLElement {
+  const lines: Array<[string, string]> = [
+    ["00:42", "The remake runs natively on PC, no emulator needed."],
+    ["03:12", "Setup, graphics options and frame rate on a mid-range GPU."],
+    ["07:55", "Verdict: is it worth replaying the classic?"],
+  ];
+  return el("div", { class: "hero-preview", "aria-hidden": "true" }, [
+    el("div", { class: "preview-bar" }, [
+      el("span", { class: "preview-dot" }),
+      el("span", { class: "preview-dot" }),
+      el("span", { class: "preview-dot" }),
+      el("span", { class: "preview-chip", "data-i18n": "previewSummary" }),
+    ]),
+    ...lines.map(([time, text]) =>
+      el("div", { class: "preview-line" }, [el("span", { class: "time" }, [time]), el("span", {}, [text])]),
+    ),
   ]);
 }
 

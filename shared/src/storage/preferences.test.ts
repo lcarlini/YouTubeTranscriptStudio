@@ -1,15 +1,18 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { EXTENSION_ID, EXTENSION_KEY, chromeExtensionIdFromKey } from "../identity";
 import {
+  APPEARANCE_KEYS,
   BROWSER_PROFILE,
   PREF_API_KEY,
   PREF_API_MODEL,
   PREF_API_URL,
   detectLocale,
+  initialAppearance,
   readActiveProfileId,
   readProfiles,
   readStoredLocale,
   readStoredTab,
+  readStoredTheme,
   writeActiveProfileId,
   writeProfiles,
 } from "./preferences";
@@ -26,6 +29,46 @@ function memoryStorage(): Storage {
     setItem: (key: string, value: string) => { data.set(key, String(value)); },
   };
 }
+
+describe("appearance", () => {
+  beforeEach(() => {
+    vi.stubGlobal("localStorage", memoryStorage());
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("maps the 1.0 theme values to the new names, and defaults to blue", () => {
+    expect(readStoredTheme("dark")).toBe("blue");
+    expect(readStoredTheme("light")).toBe("white");
+    expect(readStoredTheme("black")).toBe("black");
+    expect(readStoredTheme(null)).toBe("blue");
+    expect(readStoredTheme("neon")).toBe("blue");
+  });
+
+  it("falls back to the defaults for any value it does not recognise", () => {
+    localStorage.setItem("yts.accent", "purple");
+    localStorage.setItem("yts.density", "compact");
+    localStorage.setItem("yts.motion", "off");
+    expect(initialAppearance()).toEqual({
+      theme: "blue",
+      accent: "blue",
+      density: "compact",
+      contrast: "standard",
+      motion: "off",
+    });
+  });
+
+  it("keeps every appearance key in one place", () => {
+    expect(APPEARANCE_KEYS).toEqual({
+      theme: "yts.theme",
+      accent: "yts.accent",
+      density: "yts.density",
+      contrast: "yts.contrast",
+      motion: "yts.motion",
+    });
+  });
+});
 
 describe("AI profiles", () => {
   beforeEach(() => {

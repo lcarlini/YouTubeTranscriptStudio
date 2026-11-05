@@ -1,7 +1,20 @@
 export type Locale = "en" | "pt-BR" | "es";
 
 export type TabId = "transcript" | "insights" | "chat" | "study" | "export";
-export type Theme = "dark" | "light";
+/** Blue is the default dark theme; white is light; black is pure black for OLED screens. */
+export type Theme = "blue" | "white" | "black";
+export type Accent = "blue" | "teal" | "violet" | "amber" | "rose";
+export type Density = "comfortable" | "compact";
+export type Contrast = "standard" | "more";
+export type Motion = "on" | "off";
+
+export interface Appearance {
+  theme: Theme;
+  accent: Accent;
+  density: Density;
+  contrast: Contrast;
+  motion: Motion;
+}
 
 export interface TranscriptSegment {
   id: string;
