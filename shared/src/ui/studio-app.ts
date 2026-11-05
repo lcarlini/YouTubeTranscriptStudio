@@ -16,12 +16,15 @@ import {
 import { condenseTranscript, transcriptParts } from "../ai/chunk";
 import { LocalModelClient } from "../ai/client";
 import {
+  ANTHROPIC_DEFAULT_MODEL,
   isModelListed,
   remoteComplete,
   remoteEnabled,
+  remoteIsPaid,
   remoteModels,
   remoteWarm,
   normalizeBaseUrl,
+  type RemoteProvider,
   type RemoteSettings,
 } from "../ai/remote";
 import {
@@ -46,24 +49,29 @@ import {
 import { StudioError, isStudioError } from "../errors";
 import type { MessageKey } from "../i18n";
 import { translate } from "../i18n";
-import { clearVideos, deleteVideo, listVideos, saveVideo } from "../storage/history";
+import { clearVideos, deleteVideo, getVideo, listVideos, saveVideo } from "../storage/history";
 import {
+  BROWSER_PROFILE,
   PREF_INCLUDE_CHAT,
   PREF_LANGUAGE,
   PREF_TAB,
   PREF_THEME,
+  type AiProfile,
   initialLocale,
   initialTab,
   initialTheme,
   localGet,
   localSet,
-  readStoredRemote,
-  writeStoredRemote,
+  newProfileId,
+  readActiveProfileId,
+  readProfiles,
+  writeActiveProfileId,
+  writeProfiles,
 } from "../storage/preferences";
-import { findMatches, rangesForSegment } from "../transcript/search";
+import { findMatches, groupMatchesBySegment } from "../transcript/search";
 import { parsePlainTranscript } from "../transcript/parse";
 import { formatTimestamp, parseClock } from "../transcript/time";
-import type { ChatMessage, Citation, Insights, KeyPoint, TabId, Theme, TranscriptSegment, VideoRecord } from "../types";
+import type { ChatMessage, Citation, Insights, TabId, Theme, TranscriptSegment, VideoRecord } from "../types";
 import { fetchYouTubeTranscript, preferredCaptionLanguages } from "../youtube/fetch-transcript";
 import type { FetchedTranscript } from "../youtube/fetch-transcript";
 import { canonicalWatchUrl, parseYouTubeVideoId, thumbnailUrl } from "../youtube/url";
@@ -73,16 +81,43 @@ import { hasTimes, parseInline, parseRichText, type RichBlock, type RichInline }
 const TABS: TabId[] = ["insights", "transcript", "chat", "study", "export"];
 /** Questions like "resuma este vídeo" are answered from the summary, not from keyword matches. */
 const SUMMARY_INTENT = /\b(resum\w*|summar\w*|resumen\w*|tl;?dr|overview)\b/i;
-/** Transcript text per API request. Portuguese with timestamps is about 2.9 characters per token, so this is about 5k tokens and leaves room for the 8k-token context. */
-/** Chat sees this much transcript; answers are short, so the longer context costs little. */
-const REMOTE_CONTEXT_CHARS = 14000;
-/**
- * One API request holds this much transcript. ~8k-token models (Llama 3.1 8B) keep
- * room for the JSON answer; longer videos are evenly condensed instead of split into
- * N sequential/parallel calls (one GPU still runs those one-by-one and feels slower).
- */
-const REMOTE_SUMMARY_CHARS = 14000;
 const SUMMARY_VERSION = 5;
+/** Profile id of the "+ New profile" entry in the settings list. */
+const NEW_PROFILE = "__new__";
+
+/**
+ * Size of each request. Local servers (about 8k-token models such as Llama 3.1 8B)
+ * get generous limits; Claude is billed per token, so it gets the smallest limits that
+ * still give a useful answer. Longer videos are evenly condensed, not split into calls.
+ */
+interface RequestBudget {
+  /** Transcript characters sent with each request. */
+  transcriptChars: number;
+  /** Max output tokens for the whole-video summary (JSON). */
+  summaryTokens: number;
+  /** Max output tokens for a chat answer. */
+  chatTokens: number;
+  /** Max output tokens for study cards and quiz. */
+  studyTokens: number;
+}
+
+const LOCAL_BUDGET: RequestBudget = { transcriptChars: 14000, summaryTokens: 1600, chatTokens: 700, studyTokens: 640 };
+const PAID_BUDGET: RequestBudget = { transcriptChars: 9000, summaryTokens: 700, chatTokens: 350, studyTokens: 500 };
+
+function budgetFor(settings: RemoteSettings): RequestBudget {
+  return remoteIsPaid(settings) ? PAID_BUDGET : LOCAL_BUDGET;
+}
+
+function remoteFor(profiles: AiProfile[], id: string): RemoteSettings {
+  const profile = profiles.find((item) => item.id === id);
+  if (!profile) return { provider: "openai", baseUrl: "", apiKey: "", model: "" };
+  return { provider: profile.provider, baseUrl: profile.baseUrl, apiKey: profile.apiKey, model: profile.model };
+}
+
+/** Falls back to the in-browser model when the saved active id no longer exists. */
+function resolveActive(profiles: AiProfile[], id: string): string {
+  return profiles.some((profile) => profile.id === id) ? id : BROWSER_PROFILE;
+}
 const CLOCK_PREFIX = /^\[((?:\d{1,2}:)?\d{1,2}:\d{2}(?:[.,]\d{1,3})?)\]\s*/;
 const REPO = "https://github.com/lcarlini/YouTubeTranscriptStudio";
 const PAGES = "https://lcarlini.github.io/YouTubeTranscriptStudio/";
@@ -130,8 +165,16 @@ class StudioApp {
   private confirmClear = false;
   private confirmDeleteId: string | null = null;
   private saveTimer = 0;
+  private searchTimer = 0;
   private readonly model: LocalModelClient;
-  private remote: RemoteSettings = readStoredRemote();
+  /** Saved AI profiles (local servers and Claude API keys). */
+  private profiles: AiProfile[] = readProfiles();
+  /** The profile that runs summaries and chat; BROWSER_PROFILE means the in-browser model. */
+  private activeId: string = resolveActive(this.profiles, readActiveProfileId());
+  /** What the settings list shows: a profile id, NEW_PROFILE, or BROWSER_PROFILE. */
+  private selectedId: string = this.activeId;
+  /** Engine settings derived from the active profile. */
+  private remote: RemoteSettings = remoteFor(this.profiles, this.activeId);
   private paintedVideoId: string | null | undefined = undefined;
   private readonly nodes: Shell;
   /** Cold-start warm of Ollama or the in-browser model; shared so summary waits for it. */
@@ -149,10 +192,11 @@ class StudioApp {
     this.applyTheme();
     this.setTab(this.tab);
     this.paintModel();
+    this.paintProfileControls();
     this.bind();
     void this.refreshHistory();
-    // Warm the model while the side panel paints and the current-tab transcript loads.
-    void this.ensureWarm();
+    // Only a configured API is warmed up front. The in-browser model downloads on first use.
+    if (remoteEnabled(this.remote)) void this.ensureWarm();
     if (host.mode === "extension") void this.preloadExtensionVideo();
   }
 
@@ -187,12 +231,26 @@ class StudioApp {
     const cacheValue = el("strong");
     const deviceValue = el("strong");
     const fallback = el("p", { class: "muted" });
+    const profileSelect = el("select", { "data-i18n-label": "profileLabel" });
+    const profileName = el("input", { type: "text", autocomplete: "off", "data-i18n-placeholder": "profileNamePlaceholder" });
+    const providerSelect = el("select", { "data-i18n-label": "providerLabel" }, [
+      el("option", { value: "openai", "data-i18n": "providerLocal" }),
+      el("option", { value: "anthropic", "data-i18n": "providerClaude" }),
+    ]);
     const apiUrl = el("input", { type: "url", autocomplete: "off", spellcheck: "false", "data-i18n-placeholder": "apiUrlPlaceholder" });
-    apiUrl.value = this.remote.baseUrl;
+    const apiUrlField = el("label", { class: "field" }, [el("span", { "data-i18n": "apiUrlLabel" }), apiUrl]);
     const apiModel = el("input", { type: "text", autocomplete: "off", spellcheck: "false", "data-i18n-placeholder": "apiModelPlaceholder" });
-    apiModel.value = this.remote.model;
     const apiKey = el("input", { type: "password", autocomplete: "off", "data-i18n-placeholder": "apiKeyPlaceholder" });
-    apiKey.value = this.remote.apiKey;
+    const profileHint = el("p", { class: "muted profile-hint" });
+    const profileForm = el("div", { class: "profile-form" }, [
+      el("label", { class: "field" }, [el("span", { "data-i18n": "profileNameLabel" }), profileName]),
+      el("label", { class: "field" }, [el("span", { "data-i18n": "providerLabel" }), providerSelect]),
+      apiUrlField,
+      el("label", { class: "field" }, [el("span", { "data-i18n": "apiModelLabel" }), apiModel]),
+      el("label", { class: "field" }, [el("span", { "data-i18n": "apiKeyLabel" }), apiKey]),
+      profileHint,
+    ]);
+    const deleteButton = el("button", { class: "btn btn-danger", type: "button", "data-action": "api-delete", "data-i18n": "profileDelete" });
     const apiStatus = el("p", { class: "muted", role: "status" });
     const tabs = {} as Record<TabId, HTMLButtonElement>;
     const panels = {} as Record<TabId, HTMLElement>;
@@ -317,9 +375,9 @@ class StudioApp {
         fallback,
         el("h3", { "data-i18n": "apiTitle" }),
         el("p", { class: "muted", "data-i18n": "apiIntro" }),
-        el("label", { class: "field" }, [el("span", { "data-i18n": "apiUrlLabel" }), apiUrl]),
-        el("label", { class: "field" }, [el("span", { "data-i18n": "apiModelLabel" }), apiModel]),
-        el("label", { class: "field" }, [el("span", { "data-i18n": "apiKeyLabel" }), apiKey]),
+        el("label", { class: "field" }, [el("span", { "data-i18n": "profileLabel" }), profileSelect]),
+        el("div", { class: "inline" }, [deleteButton]),
+        profileForm,
         apiStatus,
         el("div", { class: "inline" }, [
           el("button", { class: "btn btn-primary", type: "button", "data-action": "api-save", "data-i18n": "apiSave" }),
@@ -449,9 +507,16 @@ class StudioApp {
       cacheValue,
       deviceValue,
       fallback,
+      profileSelect,
+      profileName,
+      providerSelect,
       apiUrl,
+      apiUrlField,
       apiModel,
       apiKey,
+      profileForm,
+      profileHint,
+      deleteButton,
       apiStatus,
       settingsStatus: dialog.querySelector(".settings-status") as HTMLElement,
       tabs,
@@ -487,7 +552,9 @@ class StudioApp {
     } else if (action === "close-settings") {
       this.nodes.dialog.close();
     } else if (action === "api-save") {
-      await this.saveRemote();
+      await this.saveProfile();
+    } else if (action === "api-delete") {
+      this.deleteProfile();
     } else if (action === "api-test") {
       await this.testRemote();
     } else if (action === "use-current") {
@@ -620,7 +687,9 @@ class StudioApp {
     else if (target === this.nodes.search) {
       this.search = this.nodes.search.value;
       this.matchIndex = 0;
-      this.paintTranscriptList();
+      // Waits for a short pause in typing, so long transcripts are not rebuilt on every key.
+      window.clearTimeout(this.searchTimer);
+      this.searchTimer = window.setTimeout(() => this.paintTranscriptList(), 120);
     } else if (target === this.nodes.chatInput) {
       this.chatDraft = this.nodes.chatInput.value;
     } else if (target === this.nodes.pasteInput) {
@@ -636,6 +705,14 @@ class StudioApp {
 
   private async onChange(event: Event): Promise<void> {
     const target = event.target;
+    if (target instanceof HTMLSelectElement && target === this.nodes.profileSelect) {
+      this.selectProfile(target.value);
+      return;
+    }
+    if (target instanceof HTMLSelectElement && target === this.nodes.providerSelect) {
+      this.paintProviderFields(target.value === "anthropic" ? "anthropic" : "openai");
+      return;
+    }
     if (target instanceof HTMLSelectElement) {
       const value = target.value;
       if (value === "en" || value === "pt-BR" || value === "es") {
@@ -645,6 +722,7 @@ class StudioApp {
         this.host.onLocaleChange?.(value);
         this.applyI18n();
         this.paintSession();
+        this.paintProfileControls();
       }
     } else if (target === this.nodes.includeChat) {
       this.includeChat = this.nodes.includeChat.checked;
@@ -719,8 +797,6 @@ class StudioApp {
     try {
       const languages = preferredCaptionLanguages(this.locale);
       // Prefer the watch-tab captions first (fast). Only open the embed popup if that fails.
-      // History refresh runs in parallel with the caption fetch so the shell feels ready sooner.
-      const historyReady = this.refreshHistory();
       let fetched: FetchedTranscript | null = null;
       for (const [name, strategy] of [
         ["caption-frame", this.host.tryCaptionFrame],
@@ -739,18 +815,21 @@ class StudioApp {
         youtubeProxyPrefix: this.host.devProxy ? "/yt-proxy" : null,
         browserPage: this.host.mode === "web" && !this.host.devProxy,
       });
-      this.video = toRecord(fetched);
+      // A video processed before keeps its saved summary, study and chat; only the transcript is refreshed.
+      const saved = await getVideo(videoId).catch(() => null);
+      this.video = { ...toRecord(fetched), insights: saved?.insights ?? null, study: saved?.study ?? null, chat: saved?.chat ?? [] };
       this.phase = "ready";
       this.cardIndex = 0;
       this.quizIndex = 0;
       this.highlightedId = null;
       this.search = "";
       this.nodes.search.value = "";
-      await Promise.all([this.persist(), historyReady]);
+      await this.persist();
       await this.refreshHistory();
       this.toast(this.t("savedInBrowser"), "ok");
-      // Summary starts as soon as the transcript is ready; ensureWarm overlaps with the fetch above.
-      if (!this.video.insights) void this.runInsights();
+      // A summary starts on its own only for the free engines. Claude is billed per token,
+      // so with it the summary waits for the user to press the button.
+      if (!this.video.insights && !remoteIsPaid(this.remote)) void this.runInsights();
     } catch (error) {
       this.phase = this.video ? "ready" : "error";
       this.setFormError(this.t(messageKey(error)));
@@ -827,60 +906,180 @@ class StudioApp {
     await this.useCurrentVideo(false);
   }
 
-  private readRemoteForm(): RemoteSettings {
+  /** The settings form as typed, before any validation. */
+  private readProfileForm(): { name: string; provider: RemoteProvider; baseUrl: string; model: string; apiKey: string } {
     return {
+      name: this.nodes.profileName.value.trim(),
+      provider: this.nodes.providerSelect.value === "anthropic" ? "anthropic" : "openai",
       baseUrl: this.nodes.apiUrl.value.trim(),
       model: this.nodes.apiModel.value.trim(),
       apiKey: this.nodes.apiKey.value.trim(),
     };
   }
 
-  /** An empty URL switches the app back to the in-browser model. */
-  private async saveRemote(): Promise<void> {
-    const next = this.readRemoteForm();
-    if (next.baseUrl) {
-      try {
-        next.baseUrl = normalizeBaseUrl(next.baseUrl);
-      } catch {
-        this.nodes.apiStatus.textContent = this.t("apiBadUrl");
+  private profileName(id: string): string {
+    return this.profiles.find((profile) => profile.id === id)?.name ?? "";
+  }
+
+  /** Puts the selected profile's saved values into the form (empty defaults for a new one). */
+  private fillProfileForm(): void {
+    const profile = this.profiles.find((item) => item.id === this.selectedId);
+    const nodes = this.nodes;
+    nodes.profileName.value = profile?.name ?? "";
+    nodes.providerSelect.value = profile?.provider ?? "openai";
+    nodes.apiUrl.value = profile?.baseUrl ?? "";
+    nodes.apiModel.value = profile?.model ?? "";
+    nodes.apiKey.value = profile?.apiKey ?? "";
+    this.paintProviderFields(profile?.provider ?? "openai");
+  }
+
+  /** Shows the fields that fit the provider. Typed values are kept; only defaults are filled. */
+  private paintProviderFields(provider: RemoteProvider): void {
+    const nodes = this.nodes;
+    const isClaude = provider === "anthropic";
+    if (isClaude && !nodes.apiModel.value.trim()) nodes.apiModel.value = ANTHROPIC_DEFAULT_MODEL;
+    nodes.apiUrlField.hidden = isClaude;
+    nodes.apiModel.placeholder = isClaude ? ANTHROPIC_DEFAULT_MODEL : this.t("apiModelPlaceholder");
+    nodes.apiKey.placeholder = isClaude ? "sk-ant-..." : this.t("apiKeyPlaceholder");
+    nodes.profileHint.textContent = isClaude ? this.t("profileClaudeHint") : this.t("profileLocalHint");
+  }
+
+  /** Keeps the profile list, delete button and form in step with the selection. */
+  private paintProfileControls(): void {
+    const select = this.nodes.profileSelect;
+    select.replaceChildren(
+      ...this.profiles.map((profile) => el("option", { value: profile.id }, [profile.name])),
+      el("option", { value: BROWSER_PROFILE }, [this.t("profileBrowser")]),
+      el("option", { value: NEW_PROFILE }, [this.t("profileNewOption")]),
+    );
+    if (this.selectedId !== BROWSER_PROFILE && this.selectedId !== NEW_PROFILE && !this.profiles.some((item) => item.id === this.selectedId)) {
+      this.selectedId = this.activeId;
+    }
+    select.value = this.selectedId;
+    const profile = this.profiles.find((item) => item.id === this.selectedId);
+    const isBrowser = this.selectedId === BROWSER_PROFILE;
+    this.nodes.profileForm.hidden = isBrowser;
+    this.nodes.deleteButton.disabled = !profile;
+    if (isBrowser) {
+      this.nodes.profileHint.textContent = this.t("profileBrowserHint");
+    } else {
+      this.fillProfileForm();
+    }
+  }
+
+  /** Switching profile makes it the engine for summaries and chat straight away. */
+  private selectProfile(id: string): void {
+    this.selectedId = id;
+    if (id !== NEW_PROFILE) this.activate(id);
+    this.nodes.apiStatus.textContent = "";
+    this.paintProfileControls();
+  }
+
+  private activate(id: string): void {
+    this.activeId = id;
+    writeActiveProfileId(id);
+    this.remote = remoteFor(this.profiles, id);
+    // A new engine needs its own warm-up; drop the one for the previous engine.
+    this.warmPromise = null;
+    this.paintModel();
+    if (remoteEnabled(this.remote)) void this.ensureWarm();
+  }
+
+  /** Creates or updates the selected profile, then makes it the active one. */
+  private async saveProfile(): Promise<void> {
+    if (this.selectedId === BROWSER_PROFILE) return;
+    const form = this.readProfileForm();
+    const status = this.nodes.apiStatus;
+    let baseUrl = "";
+    let model = form.model;
+    if (form.provider === "anthropic") {
+      if (!form.apiKey) {
+        status.textContent = this.t("apiNeedsKey");
         return;
       }
-      if (!next.model) {
-        this.nodes.apiStatus.textContent = this.t("apiNeedsModel");
+      model ||= ANTHROPIC_DEFAULT_MODEL;
+    } else {
+      if (!form.baseUrl) {
+        status.textContent = this.t("apiNeedsUrl");
+        return;
+      }
+      try {
+        baseUrl = normalizeBaseUrl(form.baseUrl);
+      } catch {
+        status.textContent = this.t("apiBadUrl");
+        return;
+      }
+      if (!model) {
+        status.textContent = this.t("apiNeedsModel");
         return;
       }
       // Asked before any await, so the browser still treats the click as a user gesture.
-      const granted = this.host.requestOrigin ? await this.host.requestOrigin(next.baseUrl) : true;
+      const granted = this.host.requestOrigin ? await this.host.requestOrigin(baseUrl) : true;
       if (!granted) {
-        this.nodes.apiStatus.textContent = this.t("apiPermissionDenied");
+        status.textContent = this.t("apiPermissionDenied");
         return;
       }
     }
-    this.remote = next;
-    writeStoredRemote(next);
-    this.nodes.apiUrl.value = next.baseUrl;
-    this.nodes.apiStatus.textContent = next.baseUrl
-      ? this.t("apiSaved", { model: next.model })
-      : this.t("apiCleared");
+    const isNew = this.selectedId === NEW_PROFILE;
+    const id = isNew ? newProfileId() : this.selectedId;
+    const name = form.name || (form.provider === "anthropic" ? "Claude API" : "Local server");
+    const profile: AiProfile = { id, name, provider: form.provider, baseUrl, model, apiKey: form.apiKey };
+    this.profiles = isNew
+      ? [...this.profiles, profile]
+      : this.profiles.map((item) => (item.id === id ? profile : item));
+    writeProfiles(this.profiles);
+    this.selectedId = id;
+    this.activate(id);
+    this.paintProfileControls();
+    status.textContent = this.t("apiSaved", { model });
+  }
+
+  private deleteProfile(): void {
+    const id = this.selectedId;
+    if (id === BROWSER_PROFILE || id === NEW_PROFILE) return;
+    const name = this.profileName(id);
+    if (!window.confirm(this.t("profileDeleteConfirm") + (name ? ` (${name})` : ""))) return;
+    this.profiles = this.profiles.filter((profile) => profile.id !== id);
+    writeProfiles(this.profiles);
+    if (this.activeId === id) this.activate(BROWSER_PROFILE);
+    this.selectedId = this.activeId;
+    this.nodes.apiStatus.textContent = this.t("apiCleared");
+    this.paintProfileControls();
     this.paintModel();
   }
 
   private async testRemote(): Promise<void> {
-    const form = this.readRemoteForm();
-    if (!form.baseUrl) {
-      this.nodes.apiStatus.textContent = this.t("apiNoUrl");
+    const form = this.readProfileForm();
+    const status = this.nodes.apiStatus;
+    if (form.provider === "anthropic" && !form.apiKey) {
+      status.textContent = this.t("apiNeedsKey");
       return;
     }
-    this.nodes.apiStatus.textContent = this.t("apiTesting");
+    if (form.provider !== "anthropic" && !form.baseUrl) {
+      status.textContent = this.t("apiNeedsUrl");
+      return;
+    }
+    status.textContent = this.t("apiTesting");
     try {
-      const settings = { ...form, baseUrl: normalizeBaseUrl(form.baseUrl) };
+      const settings: RemoteSettings = form.provider === "anthropic"
+        ? { provider: "anthropic", baseUrl: "", apiKey: form.apiKey, model: form.model || ANTHROPIC_DEFAULT_MODEL }
+        : { provider: "openai", baseUrl: normalizeBaseUrl(form.baseUrl), apiKey: form.apiKey, model: form.model };
       const ids = await remoteModels(settings);
-      this.nodes.apiStatus.textContent = !form.model || isModelListed(ids, form.model)
+      status.textContent = !form.model || isModelListed(ids, form.model)
         ? this.t("apiOk", { count: ids.length })
         : this.t("apiModelMissing", { model: form.model, list: ids.slice(0, 5).join(", ") || "-" });
     } catch (error) {
-      this.nodes.apiStatus.textContent = this.t(messageKey(error));
+      status.textContent = this.errorText(error);
     }
+  }
+
+  /** Server errors carry the API's own message, which is more useful than a generic one. */
+  private errorText(error: unknown): string {
+    if (isStudioError(error) && error.code === "remote-auth") return this.t("apiAuthFailed");
+    if (isStudioError(error) && error.code === "remote-api" && error.message) {
+      return `${this.t("apiFailed")} ${error.message}`;
+    }
+    return this.t(messageKey(error));
   }
 
   /**
@@ -897,9 +1096,10 @@ class StudioApp {
       video.insights = remoteEnabled(this.remote)
         ? await this.summarizeWithApi(video)
         : await this.summarizeLocally(video);
-      await this.persist();
+      // Saved to the video this summary belongs to, even if the user opened another one meanwhile.
+      await this.persist(video);
     } catch (error) {
-      this.toast(this.t(isStudioError(error) ? messageKey(error) : "insightsFailed"), "err");
+      this.toast(isStudioError(error) ? this.errorText(error) : this.t("insightsFailed"), "err");
     } finally {
       this.insightsBusy = false;
       this.insightsProgress = "";
@@ -910,10 +1110,11 @@ class StudioApp {
   /** One request: full or evenly condensed transcript → overview + key moments. */
   private async summarizeWithApi(video: VideoRecord): Promise<Insights> {
     const engine = this.remote.model;
+    const budget = budgetFor(this.remote);
     // Points without a time are placed at the transcript line that best matches them.
     const locate = (text: string): number | null => retrieveSegments(video.segments, text, 1)[0]?.start ?? null;
     const language = languageName(video.captionLanguage);
-    const transcript = condenseTranscript(video.segments, REMOTE_SUMMARY_CHARS);
+    const transcript = condenseTranscript(video.segments, budget.transcriptChars);
     this.insightsProgress = this.t("summaryRemote", { model: engine });
     this.paintInsights();
     await this.ensureWarm();
@@ -921,7 +1122,7 @@ class StudioApp {
       this.remote,
       REMOTE_SUMMARY_SYSTEM,
       buildRemoteSummaryUserPrompt(transcript, language),
-      { maxTokens: 1600, json: true },
+      { maxTokens: budget.summaryTokens, json: true },
     );
     const parsed = parseRemoteSummary(raw, locate);
     if (parsed.points.length === 0 && !parsed.overview) {
@@ -992,25 +1193,32 @@ class StudioApp {
 
   private async runStudy(): Promise<void> {
     if (!this.video || this.studyBusy) return;
+    const video = this.video;
     this.studyBusy = true;
     this.paintStudy();
     try {
-      const summary = this.video.insights ? summaryAsText(this.video.insights) : "";
-      const notes = [summary, condenseTranscript(this.video.segments, 1800)]
+      const summary = video.insights ? summaryAsText(video.insights) : "";
+      const notes = [summary, condenseTranscript(video.segments, 1800)]
         .filter(Boolean)
         .join("\n");
-      let parsed = parseStudyPack(await this.model.generate(STUDY_SYSTEM, buildStudyUserPrompt(notes), 640));
-      parsed ??= parseStudyPack(await this.model.generate(STUDY_SYSTEM, buildStudyUserPrompt(notes.slice(0, 1200)), 480));
+      const budget = budgetFor(this.remote);
+      // The active API writes the study pack when one is set; otherwise the in-browser model does.
+      const generate = (system: string, user: string, maxTokens: number): Promise<string> =>
+        remoteEnabled(this.remote)
+          ? remoteComplete(this.remote, system, user, { maxTokens })
+          : this.model.generate(system, user, maxTokens);
+      let parsed = parseStudyPack(await generate(STUDY_SYSTEM, buildStudyUserPrompt(notes), budget.studyTokens));
+      parsed ??= parseStudyPack(await generate(STUDY_SYSTEM, buildStudyUserPrompt(notes.slice(0, 1200)), Math.round(budget.studyTokens * 0.75)));
       if (!parsed || (parsed.flashcards.length === 0 && parsed.quiz.length === 0)) throw new Error("empty study");
-      this.video.study = parsed;
+      video.study = parsed;
       this.cardIndex = 0;
       this.cardFlipped = false;
       this.quizIndex = 0;
       this.quizChoice = null;
       this.quizChecked = false;
-      await this.persist();
+      await this.persist(video);
     } catch (error) {
-      this.toast(this.t(isStudioError(error) ? messageKey(error) : "studyFailed"), "err");
+      this.toast(isStudioError(error) ? this.errorText(error) : this.t("studyFailed"), "err");
     } finally {
       this.studyBusy = false;
       this.paintStudy();
@@ -1021,6 +1229,8 @@ class StudioApp {
     if (!this.video || this.chatBusy) return;
     const question = this.chatDraft.trim();
     if (!question) return;
+    // Captured now: the answer belongs to this video even if another one is opened while waiting.
+    const video = this.video;
     const userMessage: ChatMessage = {
       id: uid("q"),
       role: "user",
@@ -1029,7 +1239,7 @@ class StudioApp {
       insufficient: false,
       createdAt: Date.now(),
     };
-    this.video.chat.push(userMessage);
+    video.chat.push(userMessage);
     this.chatDraft = "";
     this.nodes.chatInput.value = "";
     this.chatBusy = true;
@@ -1038,34 +1248,35 @@ class StudioApp {
       if (SUMMARY_INTENT.test(question)) {
         // A summary request needs the whole video, which keyword retrieval cannot provide.
         // Summaries saved by older versions have no titled key moments; build a fresh one.
-        if ((this.video.insights?.version ?? 0) < SUMMARY_VERSION) await this.runInsights();
-        const insights = this.video.insights;
-        this.video.chat.push({
+        if ((video.insights?.version ?? 0) < SUMMARY_VERSION) await this.runInsights();
+        const insights = video.insights;
+        video.chat.push({
           id: uid("a"),
           role: "assistant",
           content: insights ? summaryAsText(insights, this.t("takeaways")) : this.t("insightsFailed"),
-          citations: insights ? citationsFromSummary(insights, this.video.segments) : [],
+          citations: insights ? citationsFromSummary(insights, video.segments) : [],
           insufficient: !insights,
           createdAt: Date.now(),
         });
-        await this.persist();
+        await this.persist(video);
         return;
       }
       if (remoteEnabled(this.remote)) {
-        const transcript = condenseTranscript(this.video.segments, REMOTE_CONTEXT_CHARS);
-        const answer = (await remoteComplete(this.remote, REMOTE_CHAT_SYSTEM, buildRemoteChatUserPrompt(question, transcript), { maxTokens: 700 })).trim();
-        this.video.chat.push({
+        const budget = budgetFor(this.remote);
+        const transcript = condenseTranscript(video.segments, budget.transcriptChars);
+        const answer = (await remoteComplete(this.remote, REMOTE_CHAT_SYSTEM, buildRemoteChatUserPrompt(question, transcript), { maxTokens: budget.chatTokens })).trim();
+        video.chat.push({
           id: uid("a"),
           role: "assistant",
           content: answer,
-          citations: citationsFromText(answer, this.video.segments),
+          citations: citationsFromText(answer, video.segments),
           insufficient: false,
           createdAt: Date.now(),
         });
-        await this.persist();
+        await this.persist(video);
         return;
       }
-      const excerpts = retrieveSegments(this.video.segments, question, 12);
+      const excerpts = retrieveSegments(video.segments, question, 12);
       const raw = await this.model.generate(CHAT_SYSTEM, buildChatUserPrompt(question, excerpts), 360);
       const parsed = parseChatResponse(raw);
       const citations: Citation[] = parsed.insufficient
@@ -1077,9 +1288,9 @@ class StudioApp {
         }))
         : parsed.citations.map((citation) => ({
           ...citation,
-          segmentId: nearestSegment(this.video?.segments ?? [], citation.start)?.id,
+          segmentId: nearestSegment(video.segments, citation.start)?.id,
         }));
-      this.video.chat.push({
+      video.chat.push({
         id: uid("a"),
         role: "assistant",
         content: parsed.insufficient ? this.t("insufficient") : parsed.answer,
@@ -1087,9 +1298,9 @@ class StudioApp {
         insufficient: parsed.insufficient,
         createdAt: Date.now(),
       });
-      await this.persist();
+      await this.persist(video);
     } catch (error) {
-      this.toast(this.t(messageKey(error)), "err");
+      this.toast(isStudioError(error) ? this.errorText(error) : this.t("networkError"), "err");
     } finally {
       this.chatBusy = false;
       this.paintChatLog();
@@ -1284,9 +1495,12 @@ class StudioApp {
     clear(this.nodes.segmentList);
     this.nodes.segmentList.removeAttribute("aria-busy");
     if (!this.video) return;
+    // One pass over the matches, and one DOM insertion for all rows.
+    const rangesById = groupMatchesBySegment(matches);
+    const rows = document.createDocumentFragment();
     let seen = 0;
     for (const segment of this.video.segments) {
-      const ranges = rangesForSegment(matches, segment.id);
+      const ranges = rangesById.get(segment.id) ?? [];
       const text = el("div", {
         class: "segment-text",
         contenteditable: "true",
@@ -1316,8 +1530,9 @@ class StudioApp {
           "aria-label": this.t("copySegment"),
         }, [this.t("copySegment")]),
       ]);
-      this.nodes.segmentList.append(row);
+      rows.append(row);
     }
+    this.nodes.segmentList.append(rows);
   }
 
   private paintInsights(): void {
@@ -1578,7 +1793,7 @@ class StudioApp {
     if (phase === "error") label = this.t("modelError");
     this.nodes.settingsStatus.textContent = label;
     if (remoteEnabled(this.remote)) {
-      label = `${this.t("modelApi")} · ${this.remote.model}`;
+      label = `${this.profileName(this.activeId) || this.t("modelApi")} · ${this.remote.model}`;
       this.nodes.modelPill.dataset.phase = "ready";
     }
     this.nodes.modelPill.textContent = label;
@@ -1621,10 +1836,11 @@ class StudioApp {
     this.paintHistory();
   }
 
-  private async persist(): Promise<void> {
-    if (!this.video) return;
+  /** Saves a video record; defaults to the open one. Pass the record to save a video that is no longer open. */
+  private async persist(record: VideoRecord | null = this.video): Promise<void> {
+    if (!record) return;
     try {
-      await saveVideo(this.video);
+      await saveVideo(record);
     } catch {
       this.toast(this.t("cacheFailed"), "err");
     }
@@ -1668,9 +1884,16 @@ interface Shell {
   cacheValue: HTMLElement;
   deviceValue: HTMLElement;
   fallback: HTMLElement;
+  profileSelect: HTMLSelectElement;
+  profileName: HTMLInputElement;
+  providerSelect: HTMLSelectElement;
   apiUrl: HTMLInputElement;
+  apiUrlField: HTMLElement;
   apiModel: HTMLInputElement;
   apiKey: HTMLInputElement;
+  profileForm: HTMLElement;
+  profileHint: HTMLElement;
+  deleteButton: HTMLButtonElement;
   apiStatus: HTMLElement;
   settingsStatus: HTMLElement;
   tabs: Record<TabId, HTMLButtonElement>;
@@ -1779,6 +2002,8 @@ function messageKey(error: unknown): MessageKey {
       return "apiUnreachable";
     case "remote-api":
       return "apiFailed";
+    case "remote-auth":
+      return "apiAuthFailed";
     case "model-download":
       return "modelDownloadFailed";
     case "cache":

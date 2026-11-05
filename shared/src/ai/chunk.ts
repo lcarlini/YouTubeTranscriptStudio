@@ -67,10 +67,17 @@ export function condenseTranscript(segments: TranscriptSegment[], maxChars: numb
   const full = lines.join("\n");
   if (full.length <= maxChars) return full;
   const step = Math.max(1, Math.ceil(lines.length / Math.max(1, Math.floor(maxChars / 90))));
+  // Track the length as lines are added instead of re-joining on every step (that was quadratic).
   const sampled: string[] = [];
+  let size = 0;
   for (let index = 0; index < lines.length; index += step) {
-    sampled.push(lines[index]);
-    if (sampled.join("\n").length >= maxChars) break;
+    const line = lines[index];
+    const added = line.length + (sampled.length > 0 ? 1 : 0);
+    if (size + added > maxChars) break;
+    sampled.push(line);
+    size += added;
   }
-  return sampled.join("\n").slice(0, maxChars);
+  // Keeps whole lines only; a single line longer than the limit is cut so it still fits.
+  if (sampled.length === 0) return lines[0].slice(0, maxChars);
+  return sampled.join("\n");
 }

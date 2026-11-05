@@ -1,6 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { isStudioError } from "../errors";
-import { isModelListed, normalizeBaseUrl, remoteComplete, remoteEnabled, remoteWarm } from "./remote";
+import {
+  ANTHROPIC_DEFAULT_MODEL,
+  isModelListed,
+  normalizeBaseUrl,
+  remoteComplete,
+  remoteEnabled,
+  remoteIsPaid,
+  remoteModels,
+  remoteWarm,
+} from "./remote";
 import { parseRemoteSummary, timestampsIn } from "./parse-model";
 
 afterEach(() => {
@@ -19,9 +28,16 @@ describe("normalizeBaseUrl", () => {
 
   it("treats an empty value as no API", () => {
     expect(normalizeBaseUrl("   ")).toBe("");
-    expect(remoteEnabled({ baseUrl: "", apiKey: "", model: "m" })).toBe(false);
-    expect(remoteEnabled({ baseUrl: "http://localhost:11434/v1", apiKey: "", model: "" })).toBe(false);
-    expect(remoteEnabled({ baseUrl: "http://localhost:11434/v1", apiKey: "", model: "m" })).toBe(true);
+    expect(remoteEnabled({ provider: "openai", baseUrl: "", apiKey: "", model: "m" })).toBe(false);
+    expect(remoteEnabled({ provider: "openai", baseUrl: "http://localhost:11434/v1", apiKey: "", model: "" })).toBe(false);
+    expect(remoteEnabled({ provider: "openai", baseUrl: "http://localhost:11434/v1", apiKey: "", model: "m" })).toBe(true);
+  });
+
+  it("needs a key, not a URL, for the Claude API", () => {
+    expect(remoteEnabled({ provider: "anthropic", baseUrl: "", apiKey: "", model: "claude-haiku-5-5" })).toBe(false);
+    expect(remoteEnabled({ provider: "anthropic", baseUrl: "", apiKey: "sk-ant-x", model: "claude-haiku-5-5" })).toBe(true);
+    expect(remoteIsPaid({ provider: "anthropic", baseUrl: "", apiKey: "k", model: "m" })).toBe(true);
+    expect(remoteIsPaid({ provider: "openai", baseUrl: "http://localhost:11434", apiKey: "", model: "m" })).toBe(false);
   });
 
   it("rejects anything that is not http or https", () => {
@@ -95,8 +111,84 @@ describe("timestampsIn", () => {
   });
 });
 
+describe("Claude API profile", () => {
+  const claude = { provider: "anthropic" as const, baseUrl: "", apiKey: "sk-ant-test", model: ANTHROPIC_DEFAULT_MODEL };
+
+  function bodyOf(fetchMock: ReturnType<typeof vi.fn>): Record<string, unknown> {
+    return JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body)) as Record<string, unknown>;
+  }
+
+  it("sends the cheapest settings: Haiku 5.5, low effort, no thinking, no sampling options", async () => {
+    const fetchMock = vi.fn(async () =>
+      new Response(JSON.stringify({ content: [{ type: "text", text: "{\"overview\":\"x\"}" }] }), { status: 200 }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await remoteComplete(claude, "system text", "user text", { maxTokens: 700, json: true });
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe("https://api.anthropic.com/v1/messages");
+    const headers = init.headers as Record<string, string>;
+    expect(headers["x-api-key"]).toBe("sk-ant-test");
+    expect(headers["anthropic-version"]).toBe("2023-06-01");
+    expect(headers["anthropic-dangerous-direct-browser-access"]).toBe("true");
+    expect(headers.Authorization).toBeUndefined();
+    const body = bodyOf(fetchMock);
+    expect(body).toMatchObject({
+      model: "claude-haiku-5-5",
+      max_tokens: 700,
+      thinking: { type: "disabled" },
+      output_config: { effort: "low" },
+      system: "system text",
+      messages: [{ role: "user", content: "user text" }],
+    });
+    expect(body).not.toHaveProperty("temperature");
+    expect(body).not.toHaveProperty("response_format");
+  });
+
+  it("joins the text blocks of the answer", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ content: [{ type: "text", text: "Olá " }, { type: "text", text: "mundo" }] }), { status: 200 }),
+    ));
+    await expect(remoteComplete(claude, "s", "u", { maxTokens: 50 })).resolves.toBe("Olá mundo");
+  });
+
+  it("tests the key through the free Models endpoint, not a paid message", async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: [{ id: "claude-haiku-5-5" }] }), { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(remoteModels(claude)).resolves.toEqual(["claude-haiku-5-5"]);
+    const [url] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toContain("https://api.anthropic.com/v1/models");
+  });
+
+  it("does not spend a warm-up call on Claude", async () => {
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    await remoteWarm(claude);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("shows the API's own message for a rejected key, and marks it as an auth error", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ type: "error", error: { type: "authentication_error", message: "invalid x-api-key" } }), { status: 401 }),
+    ));
+    await expect(remoteComplete(claude, "s", "u", { maxTokens: 10 })).rejects.toMatchObject({
+      code: "remote-auth",
+      message: expect.stringContaining("invalid x-api-key"),
+    });
+  });
+
+  it("reports a model error with the message, so the user knows what to fix", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () =>
+      new Response(JSON.stringify({ error: { message: "model: claude-x not found" } }), { status: 404 }),
+    ));
+    await expect(remoteComplete(claude, "s", "u", { maxTokens: 10 })).rejects.toMatchObject({
+      code: "remote-api",
+      message: expect.stringContaining("claude-x not found"),
+    });
+  });
+});
+
 describe("remoteComplete", () => {
-  const settings = { baseUrl: "http://localhost:11434", apiKey: "", model: "yts-llama3.1-8b" };
+  const settings = { provider: "openai" as const, baseUrl: "http://localhost:11434", apiKey: "", model: "yts-llama3.1-8b" };
 
   it("warms the model with a tiny completion when an API is configured", async () => {
     const fetchMock = vi.fn(async () =>

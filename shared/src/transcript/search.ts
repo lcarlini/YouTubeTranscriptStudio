@@ -32,3 +32,17 @@ export function rangesForSegment(matches: TranscriptMatch[], segmentId: string):
     .filter((match) => match.segmentId === segmentId)
     .map((match) => [match.startOffset, match.endOffset] as [number, number]);
 }
+
+/**
+ * Groups every match by its segment in one pass. Use this instead of calling
+ * rangesForSegment once per segment, which scans all matches each time.
+ */
+export function groupMatchesBySegment(matches: TranscriptMatch[]): Map<string, Array<[number, number]>> {
+  const groups = new Map<string, Array<[number, number]>>();
+  for (const match of matches) {
+    const ranges = groups.get(match.segmentId);
+    if (ranges) ranges.push([match.startOffset, match.endOffset]);
+    else groups.set(match.segmentId, [[match.startOffset, match.endOffset]]);
+  }
+  return groups;
+}

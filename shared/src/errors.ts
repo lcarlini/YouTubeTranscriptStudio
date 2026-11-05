@@ -10,7 +10,8 @@ export type ErrorCode =
   | "extension-permission"
   | "empty-transcript"
   | "remote-unreachable"
-  | "remote-api";
+  | "remote-api"
+  | "remote-auth";
 
 export class StudioError extends Error {
   readonly code: ErrorCode;
