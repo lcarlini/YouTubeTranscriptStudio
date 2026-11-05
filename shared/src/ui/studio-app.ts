@@ -102,7 +102,9 @@ interface RequestBudget {
 }
 
 const LOCAL_BUDGET: RequestBudget = { transcriptChars: 14000, summaryTokens: 1600, chatTokens: 700, studyTokens: 640 };
-const PAID_BUDGET: RequestBudget = { transcriptChars: 9000, summaryTokens: 700, chatTokens: 350, studyTokens: 500 };
+// Claude output is cheap ($0.50 per million tokens for Haiku 5.5), but a cut-off answer is
+// wasted money, so these caps leave room for a complete answer in Portuguese or Spanish.
+const PAID_BUDGET: RequestBudget = { transcriptChars: 9000, summaryTokens: 1400, chatTokens: 500, studyTokens: 1000 };
 
 function budgetFor(settings: RemoteSettings): RequestBudget {
   return remoteIsPaid(settings) ? PAID_BUDGET : LOCAL_BUDGET;

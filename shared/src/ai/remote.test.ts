@@ -94,6 +94,13 @@ describe("parseRemoteSummary", () => {
     expect(parseRemoteSummary(raw).points).toEqual([]);
   });
 
+  it("keeps the complete points of an answer cut off by the token limit", () => {
+    const raw = '{"overview":"Um vídeo sobre Zelda.","points":[{"time":"0:10","title":"Abertura","text":"Link acorda."},{"time":"1:20","title":"Templo","text":"Entrada do templo."},{"time":"2:30","title":"Chef";';
+    const summary = parseRemoteSummary(raw);
+    expect(summary.overview).toBe("Um vídeo sobre Zelda.");
+    expect(summary.points.map((point) => point.title)).toEqual(["Abertura", "Templo"]);
+  });
+
   it("fails with a StudioError when the answer is not JSON", () => {
     try {
       parseRemoteSummary("Here is your summary, no JSON.");

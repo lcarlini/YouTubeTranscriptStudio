@@ -52,17 +52,34 @@ export interface RemoteSummary {
   points: KeyPoint[];
 }
 
+function asObject(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+/**
+ * Reads the first JSON object in an answer. When the answer was cut off by the token
+ * limit, keeps every complete point before the cut instead of discarding the whole summary.
+ */
 function parseJsonObject(raw: string): Record<string, unknown> | null {
   const text = stripFences(raw);
   const start = text.indexOf("{");
-  const end = text.lastIndexOf("}");
-  if (start === -1 || end <= start) return null;
+  if (start === -1) return null;
+  const body = text.slice(start);
   try {
-    const value: unknown = JSON.parse(text.slice(start, end + 1));
-    return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+    return asObject(JSON.parse(body.slice(0, body.lastIndexOf("}") + 1)));
   } catch {
-    return null;
+    // Fall through to the truncated-answer recovery below.
   }
+  // Try each closing brace from the end: close the points list and the object there.
+  for (let at = body.lastIndexOf("}"), tries = 0; at > 0 && tries < 25; at = body.lastIndexOf("}", at - 1), tries += 1) {
+    try {
+      const salvaged = asObject(JSON.parse(`${body.slice(0, at + 1)}]}`));
+      if (salvaged) return salvaged;
+    } catch {
+      // Not a clean cut point; try an earlier brace.
+    }
+  }
+  return null;
 }
 
 /** Reads the API's JSON answer. Points without a usable time or title are dropped, not guessed. */
