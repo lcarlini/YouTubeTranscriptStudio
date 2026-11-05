@@ -225,3 +225,11 @@ coverage/
 .vite/
 *.tsbuildinfo
 shared/dist-types/
+
+# Secrets: API keys and local credentials must never be committed
+.env.*
+*.pem
+*.key
+secrets.*
+*api-key*
+*api_key*
