@@ -293,6 +293,8 @@ class StudioApp {
         el("button", { class: "btn btn-ghost", type: "button", "data-action": "prev-match", "data-i18n": "prevMatch" }),
         el("button", { class: "btn btn-ghost", type: "button", "data-action": "next-match", "data-i18n": "nextMatch" }),
         el("button", { class: "btn btn-ghost", type: "button", "data-action": "copy-all", "data-i18n": "copyTranscript" }),
+        el("button", { class: "btn btn-ghost", type: "button", "data-action": "download", "data-format": "srt", "data-i18n": "downloadSrt" }),
+        el("button", { class: "btn btn-ghost", type: "button", "data-action": "download", "data-format": "txt", "data-i18n": "downloadTxt" }),
       ]),
       el("p", { class: "muted", "data-i18n": "editHint" }),
       estimated,
